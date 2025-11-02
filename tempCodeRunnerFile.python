@@ -1,0 +1,12 @@
+import pandas as pd
+
+def average_csv_table(file_path):
+    df = pd.read_csv(file_path)
+    numeric_df = df.select_dtypes(include='number')  # select only numeric columns
+    averages = numeric_df.mean().to_frame(name='Average').reset_index()
+    averages.columns = ['Column', 'Average']
+    print(averages)
+
+# Example usage:
+file_path = "rouge_scores.csv"
+average_csv_table(file_path)
