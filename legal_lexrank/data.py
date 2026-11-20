@@ -6,7 +6,7 @@ from pathlib import Path
 from random import Random
 
 
-# Keep the order used in the corpus's RR.txt and role-weight vectors.
+# Stable role order for the annotated corpus and fitted weight vectors.
 ROLES = (
     "Facts",
     "Argument",

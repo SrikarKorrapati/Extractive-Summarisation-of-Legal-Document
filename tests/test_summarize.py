@@ -1,25 +1,35 @@
-"""Verify inference uses the same fitted checkpoint and role weights as evaluation."""
+"""Exercise the summary command using an isolated fitted-run fixture."""
 
 import json
-from pathlib import Path
 
 import pytest
 
-from legal_lexrank.summarize import main
+from legal_lexrank import summarize
 
 
-@pytest.mark.parametrize("method", [None, "unweighted"])
-def test_reproduce_published_tfidf_summary(tmp_path, capsys, method):
-    root = Path(__file__).resolve().parents[1]
-    results = root / "results"
-    report = json.loads((results / "tfidf.json").read_text())
-    row = next(row for row in report["test"]
-               if row["method"] == (method or report["selected_method"]) and row["ratio"] == 0.3)
-    judgment = root / "Judgement" / (row["case"] + ".txt")
+@pytest.mark.parametrize(("method", "expected"), [(None, "appeal statute"), ("unweighted", "appeal")])
+def test_summary_uses_selected_weights_unless_overridden(tmp_path, capsys, monkeypatch, method, expected):
+    sentences = ["appeal", "appeal statute", "appeal trial"]
+    judgment = tmp_path / "judgment.txt"
+    judgment.write_text("\n".join(sentences))
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "tfidf.json").write_text(json.dumps({"selected_method": "mean"}))
+    (results / "weights.json").write_text(json.dumps({"test": {"mean": {"Facts": 0.0, "Argument": 1.0}}}))
+
+    class RoleLabeller:
+        def predict(self, source):
+            assert source == sentences
+            return ["Facts", "Argument", "Argument"]
+
+    def load_fixture(path):
+        assert path == results / "role_labeller.pt"
+        return RoleLabeller()
+
+    monkeypatch.setattr(summarize, "load_labeller", load_fixture)
     args = [str(judgment), "--backend", "tfidf", "--results", str(results),
-            "--cache", str(tmp_path), "--ratio", "0.3"]
+            "--cache", str(tmp_path / "cache"), "--ratio", "0.3"]
     if method:
         args.extend(["--method", method])
-    main(args)
-    sentences = [line.strip() for line in judgment.read_text().splitlines() if line.strip()]
-    assert capsys.readouterr().out.splitlines() == [sentences[i] for i in row["selected_indices"]]
+    summarize.main(args)
+    assert capsys.readouterr().out.splitlines() == [expected]

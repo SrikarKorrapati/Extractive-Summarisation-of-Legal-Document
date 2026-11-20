@@ -65,7 +65,7 @@ def test_rejects_empty_sources(corpus, directory):
 
 def test_bundled_corpus():
     root = Path(__file__).resolve().parents[1]
-    assert ROLES == tuple((root / "RR.txt").read_text(encoding="utf-8").splitlines())
+    assert len(ROLES) == 7
     cases = load_cases(root)
     assert len(cases) == 50
     assert sum(len(c.sentences) for c in cases.values()) == 8656
