@@ -76,10 +76,19 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
     directory = Path(directory)
     manifest = json.loads((directory / "protocol.json").read_text(encoding="utf-8"))
     contextual = manifest.get("format") == "legal-lexrank-role-study-v2"
-    selected_epochs = manifest.get("epochs") if contextual else epochs
+    paper = manifest.get("format") == "legal-lexrank-role-study-v3"
+    selected_epochs = manifest.get("epochs") if contextual or paper else epochs
     if type(selected_epochs) is not int or selected_epochs < 1:
         raise ValueError("Role run has an invalid training epoch count")
     settings = study_settings(cases, split, seed, selected_epochs)
+    if paper:
+        from .legal_sent2vec import encoder_identity
+        from .paper_role_training import source_hashes
+
+        settings.update({"format": "legal-lexrank-role-study-v3",
+                         "architecture": "paper-pretrained-Hier-BiLSTM-CRF",
+                         "encoder_identity": encoder_identity(),
+                         "source_sha256": source_hashes()})
     if contextual:
         from . import encoders
 
@@ -114,7 +123,7 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
     for phase, (_, filename) in STAGES.items():
         if hashlib.sha256((directory / filename).read_bytes()).hexdigest() != hashes[phase]:
             raise ValueError(f"Role checkpoint checksum mismatch: {filename}")
-        if contextual:
+        if contextual or paper:
             model = load_labeller(directory / filename)
             config = manifest["config"]
             expected_metadata = {
@@ -130,12 +139,15 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
                 expected_metadata.update({
                     "train_case_ids": split["train"], "selection_sha256": manifest["selection_sha256"],
                 })
-            expected_config = {"hidden_size": config["hidden_size"],
-                               "dropout": config["dropout"], "use_position": True}
-            if config.get("center_inputs", False):
+            expected_config = {"hidden_size": config["hidden_size"], "dropout": config["dropout"]}
+            if contextual:
+                expected_config["use_position"] = True
+            if contextual and config.get("center_inputs", False):
                 expected_config["center_inputs"] = True
-            if (getattr(model, "encoder", None) != backend or model.roles != ROLES
-                    or model.input_size != encoder["dimensions"]
+            encoder_matches = (getattr(model, "encoder_identity", None) == manifest["encoder_identity"]
+                               if paper else getattr(model, "encoder", None) == backend)
+            if (not encoder_matches or model.roles != ROLES
+                    or model.input_size != (200 if paper else encoder["dimensions"])
                     or model.config != expected_config
                     or model.metadata != expected_metadata):
                 raise ValueError(f"Role checkpoint metadata mismatch: {filename}")

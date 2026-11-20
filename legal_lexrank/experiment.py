@@ -136,6 +136,9 @@ def _run(root, output, cache, backends, seed, role_run):
         settings["role_epochs"] = role_protocol["epochs"]
         if role_protocol["format"] == "legal-lexrank-role-study-v2":
             settings["role_encoder"] = role_protocol["feature_encoder"]
+        elif role_protocol["format"] == "legal-lexrank-role-study-v3":
+            settings["role_encoder"] = role_protocol["encoder_identity"]
+            settings["role_architecture"] = role_protocol["architecture"]
     record_protocol(output, settings)
 
     def fit_stage(phase):
