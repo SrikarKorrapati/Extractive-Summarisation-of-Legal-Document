@@ -1,4 +1,4 @@
-# Python 3.11. Direct and model/tokenizer dependencies used for the recorded run.
+# Python 3.11. Direct and model/tokenizer dependencies for the benchmark. Colab role training uses its hosted runtime packages.
 numpy==1.26.1
 scipy==1.12.0
 scikit-learn==1.4.1.post1

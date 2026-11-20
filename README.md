@@ -6,7 +6,7 @@ This project compares TF-IDF, Sentence-BERT, Legal-BERT, and OpenAI embeddings i
 
 [Open the training notebook in Colab](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/train_role_labeller.ipynb). Connect to a hosted CPU runtime and choose **Runtime → Run all**. The notebook fetches a pinned revision of the public corpus and model code. Each run trains a new hierarchical BiLSTM-CRF from random initialization.
 
-The seeded split reserves 10 whole judgments for testing. The notebook first trains on 32 cases and evaluates on 8 validation cases. It then trains a fresh final model on all 40 training cases and evaluates its role predictions on the 10 test cases. Each fit uses eight epochs. Download `/content/legal_lexrank_role_labeller.zip` from Colab’s Files pane before disconnecting. The archive contains the final checkpoint, per-role metrics, case IDs, and runtime details.
+The seeded split reserves 10 whole judgments for testing. The notebook first trains on 32 cases and evaluates on 8 validation cases. It then trains a fresh final model on all 40 training cases and evaluates its role predictions on the 10 test cases. Each fit uses eight epochs. Download `/content/legal_lexrank_role_labeller.zip` from Colab’s Files pane before disconnecting. The archive contains both checkpoints, their checksums, per-role metrics, case IDs, and runtime details. The revised trainer reads every token of each sentence and learns transitions within contiguous labelled spans.
 
 ## Reproduce the full summarization experiment
 
@@ -20,9 +20,16 @@ python -m pytest -q
 python -m legal_lexrank --output runs/experiment
 ```
 
-The full benchmark fits its own labellers and three candidate role-weight profiles. It selects a profile for each encoder on validation ROUGE-L F1 and evaluates all three profiles plus an unweighted baseline on the held-out cases. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
+To run the benchmark with the two Colab-trained checkpoints, unzip the training archive into an empty directory and pass that directory explicitly. The runner verifies the split, training annotations, model implementation and checkpoint hashes before scoring.
 
-The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment after running the benchmark, specify its output directory:
+```sh
+unzip legal_lexrank_role_labeller.zip -d runs/colab-roles
+python -m legal_lexrank --role-run runs/colab-roles --output runs/colab-benchmark
+```
+
+The full benchmark estimates arithmetic-mean, Chebyshev-center and geometric-median role weights from training cases. It selects a profile for each encoder on validation ROUGE-L F1 and evaluates all three profiles plus an unweighted baseline on the held-out cases. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
+
+Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment after running the benchmark, specify its output directory:
 
 ```sh
 python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/experiment
