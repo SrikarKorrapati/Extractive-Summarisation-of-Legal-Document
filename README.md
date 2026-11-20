@@ -4,17 +4,13 @@ This project compares TF-IDF, Sentence-BERT, Legal-BERT, and OpenAI embeddings i
 
 ## Train the role labeller on Google Colab
 
-The classifier learns from labelled training judgments and assigns labels to new documents. Summarization applies the fixed rhetorical-role weights listed below.
+The primary classifier follows the **pretrained Hier-BiLSTM-CRF** variant referenced by the Legal LexRank paper: raw 200-dimensional legal sent2vec sentence vectors → document BiLSTM (100 units per direction) → dropout 0.5 → linear seven-role scores → CRF. It uses the original legal-domain encoder. It has no added projection, normalization, position features, or auxiliary classification loss. [Original model and pretrained variant](https://github.com/Law-AI/semantic-segmentation/tree/16d16b2c9bad824b527d4ffa3e94e029e282b133).
 
-The [validation tuning notebook](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/tune_role_labeller.ipynb) compares pretrained Legal-BERT and OpenAI sentence representations followed by a document BiLSTM-CRF. It fits on 32 judgments, measures classification accuracy and per-role recall on eight validation judgments, and selects the training configuration and epoch. The final classifier is then fitted on all 40 training judgments before evaluating the ten reserved judgments.
+[Open the paper-model training notebook in Colab](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/paper_role_labeller.ipynb). It downloads verified sentence vectors for the 40 training judgments; Colab needs neither an API key nor the large sent2vec binary. The notebook fits on 32 judgments and uses eight validation judgments to select an optimizer schedule and epoch, by accuracy then macro F1. A fresh final model is fitted on all 40 training judgments for that fixed schedule. Download its checkpoint bundle and extract it into `runs/paper-colab`. Evaluate the ten reserved judgments separately after the model is frozen.
 
-The following paragraph describes the initial classifier baseline.
+The four summarization encoders—TF-IDF, S-BERT, Legal-BERT and OpenAI—share this same role classifier. Their vectors determine graph similarities; they do not replace the classifier's legal sent2vec encoder. The graph uses the fixed rhetorical-role importance weights below.
 
-[Open the training notebook in Colab](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/train_role_labeller.ipynb). Connect to a hosted CPU runtime and choose **Runtime → Run all**. The notebook fetches a pinned revision of the public corpus and model code. Each run trains a new hierarchical BiLSTM-CRF from random initialization.
-
-The seeded split reserves 10 whole judgments for testing. The notebook first trains on 32 cases and evaluates on 8 validation cases. It then trains a fresh final model on all 40 training cases and evaluates its role predictions on the 10 test cases. Each fit uses eight epochs. Download `/content/legal_lexrank_role_labeller.zip` from Colab’s Files pane before disconnecting. The archive contains both checkpoints, their checksums, per-role metrics, case IDs, and runtime details. The revised trainer reads every token of each sentence and learns transitions within contiguous labelled spans.
-
-The [verified Colab run](runs/colab-roles/) includes both trained models. The final model correctly labelled 1,227 of 2,120 annotated sentences in the ten test judgments (57.88% accuracy, 0.4374 macro F1). Always predicting the most common training role, *Ratio of the decision*, gives 41.79% accuracy on the same cases. The model correctly identified zero of the 54 lower-court ruling sentences. [Per-role scores](runs/colab-roles/role_metrics.json) · [Training split and checksums](runs/colab-roles/protocol.json) · [Hosted runtime](runs/colab-roles/runtime.json)
+The earlier random-word baseline in `runs/colab-roles` reached 57.88% test accuracy and missed all 54 lower-court sentences. The contextual labeller modules and `tune_role_labeller.ipynb` are exploratory extensions with additional architectural components; they are not the primary paper reproduction. Current paper-model results will be reported after hosted training and frozen test evaluation finish.
 
 ## Reproduce the full summarization experiment
 
@@ -25,21 +21,34 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pytest -q
-python -m legal_lexrank --output runs/experiment
 ```
 
-To run the benchmark with the published Colab checkpoints, pass their directory explicitly. For a new Colab fit, extract your downloaded archive into a separate directory and pass its path. The runner verifies the split, training annotations, model implementation and checkpoint hashes before scoring.
+After extracting the paper-model Colab bundle, evaluate its role predictions and then run the summarization benchmark. The runner verifies the split, training annotations, model implementation and checkpoint hashes before scoring. Install the native inference dependency below first.
 
 ```sh
-python -m legal_lexrank --role-run runs/colab-roles --output runs/reproduction
+python -m legal_lexrank.evaluate_roles --role-run runs/paper-colab --output runs/paper-role-evaluation
+python -m legal_lexrank --role-run runs/paper-colab --output runs/paper-benchmark
 ```
+
+## Install the legal sentence encoder for inference
+
+Training in Colab uses the small exported feature archive. Classifying previously unseen text locally also needs the official 2.25 GB legal sent2vec binary and its native C++ binding. A C++ compiler is required. These commands use the pinned native source, not the unrelated PyPI package named `sent2vec`.
+
+```sh
+python -m pip install Cython==0.29.37
+python -m pip install --no-deps --no-build-isolation https://github.com/epfml/sent2vec/archive/9efbc2dd69f6c737c3a752c9dc5fbb4843d578b6.zip
+mkdir -p .cache/role-original
+curl -L https://cse.iitkgp.ac.in/~saptarshi/models/sent2vec.bin -o .cache/role-original/sent2vec.bin
+```
+
+The adapter checks the exact file size and SHA256 `1e7f7f1c182a11444085262896ac833243ca4d8bd1f7168446f2219a0be909f0` before loading. Set `LEGAL_SENT2VEC_MODEL` to use a different file location. The binary stays outside Git. Sentence vectors are regenerated consistently for training and inference; the published text-vector files are not mixed with native outputs.
 
 ## Label a new judgment
 
 Provide a UTF-8 file with one sentence per nonempty line and a fitted classifier checkpoint. The command prints each original sentence followed by its predicted role, separated by a tab.
 
 ```sh
-python -m legal_lexrank.label_roles new_judgment.txt --checkpoint runs/colab-roles/role_labeller.pt
+python -m legal_lexrank.label_roles new_judgment.txt --checkpoint runs/paper-colab/role_labeller.pt
 ```
 
 ## Fixed rhetorical-role weights
@@ -63,7 +72,7 @@ The summarization benchmark evaluates these defaults alongside a similarity-only
 Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment, point to a directory containing a fitted `role_labeller.pt` checkpoint. The default applies the fixed weights. Use `--unweighted` for the similarity-only baseline.
 
 ```sh
-python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/colab-roles
+python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/paper-colab
 ```
 
 ## Repository map
