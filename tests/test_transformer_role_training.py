@@ -325,7 +325,12 @@ def test_training_loop_updates_injected_tiny_transformer_and_head(tmp_path, monk
     architecture = dict(vocab_size=9, hidden_size=8, num_hidden_layers=1,
                         num_attention_heads=2, intermediate_size=12, max_position_embeddings=16)
     if encoder == 'deberta':
-        backbone = DebertaV2Model(DebertaV2Config(**architecture, type_vocab_size=0))
+        # Two layers reuse the relative-position graph; this reproduces the
+        # checkpointing dependency present in the real pretrained backbone.
+        architecture['num_hidden_layers'] = 2
+        backbone = DebertaV2Model(DebertaV2Config(
+            **architecture, type_vocab_size=0, relative_attention=True,
+            position_buckets=16, pos_att_type=['p2c', 'c2p']))
         tokenizer.model_input_names = ['input_ids', 'attention_mask']
     else:
         backbone = BertModel(BertConfig(**architecture))
@@ -337,6 +342,8 @@ def test_training_loop_updates_injected_tiny_transformer_and_head(tmp_path, monk
         with training.deterministic_run():
             model = training.fresh_model(config)
             assert model.backbone.is_gradient_checkpointing
+            assert training.OPTIMIZER_SETTINGS['gradient_checkpointing_use_reentrant'] is False
+            assert model.backbone.encoder._gradient_checkpointing_func.keywords['use_reentrant'] is False
             cases = {'synthetic': SimpleNamespace(labelled_sentences=['a b', 'b c', 'c d', 'd a'], labels=list(ROLES[:4]))}
             examples = training.training_examples(model, cases, ['synthetic'])
             optimizer, scheduler = training.make_optimizer(model, config, steps=3)
@@ -348,6 +355,11 @@ def test_training_loop_updates_injected_tiny_transformer_and_head(tmp_path, monk
             assert np.isfinite(loss)
             assert any(not torch.equal(before, after) for before, after in zip(before_backbone, model.backbone.parameters()))
             assert not torch.equal(before_head, model.to_roles.weight)
+            if encoder == 'deberta':
+                relative_embeddings = model.backbone.encoder.rel_embeddings.weight
+                assert relative_embeddings.grad is not None
+                assert torch.isfinite(relative_embeddings.grad).all()
+                assert torch.count_nonzero(relative_embeddings.grad) > 0
             report = training.evaluate(model, cases, ['synthetic'], config, torch.device('cpu'))
             assert sum(report[role]['support'] for role in ROLES) == 4
             path = tmp_path / 'checkpoint.pt'

@@ -48,7 +48,8 @@ CONFIGURATIONS = (
 OPTIMIZER_SETTINGS = {
     'name': 'AdamW', 'weight_decay': .01, 'warmup_fraction': .1,
     'schedule': 'linear', 'gradient_clip_norm': 1.,
-    'gradient_checkpointing': True, 'cuda_precision': 'float16 with GradScaler',
+    'gradient_checkpointing': True, 'gradient_checkpointing_use_reentrant': False,
+    'cuda_precision': 'float16 with GradScaler',
     'class_weights': 'sqrt inverse fit frequency, normalized to arithmetic mean one',
     'loss_reduction': 'sum(weighted chunk CE * target-token fraction) / sum(target-token fractions) per accumulation group',
 }
@@ -156,7 +157,11 @@ def fresh_model(config, cache_dir=None):
         encoder=config['encoder'], max_length=config['max_length'],
         target_chunk_size=config['target_chunk_size'], dropout=config['dropout'],
         batch_size=config['microbatch_size'], cache_dir=cache_dir)
-    model.backbone.gradient_checkpointing_enable()
+    # DeBERTa shares relative-position embeddings between attention layers.
+    # Reentrant recomputation can traverse that shared graph twice during
+    # backward; the non-reentrant implementation handles it correctly.
+    model.backbone.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={'use_reentrant': False})
     if hasattr(model.backbone.config, 'use_cache'):
         model.backbone.config.use_cache = False
     return model
