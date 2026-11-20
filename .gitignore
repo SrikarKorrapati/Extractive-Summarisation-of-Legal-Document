@@ -7,3 +7,6 @@ __pycache__/
 .env
 .env.*
 .DS_Store
+# Full encoder weights are distributed as release assets, not Git blobs.
+runs/**/*.pt
+runs/**/*.zip
