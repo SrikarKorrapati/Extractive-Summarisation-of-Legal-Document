@@ -4,6 +4,12 @@ This project compares TF-IDF, Sentence-BERT, Legal-BERT, and OpenAI embeddings i
 
 ## Train the role labeller on Google Colab
 
+Role classification and rhetorical-role importance are separate. The classifier learns from labelled training judgments and assigns labels to new documents. The three RR-weight profiles use human annotations across all 50 judgments.
+
+The [validation tuning notebook](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/tune_role_labeller.ipynb) compares pretrained Legal-BERT and OpenAI sentence representations followed by a document BiLSTM-CRF. It fits on 32 judgments, measures classification accuracy and per-role recall on eight validation judgments, and selects the training configuration and epoch. The final classifier is then fitted on all 40 training judgments before evaluating the ten reserved judgments.
+
+The following paragraph describes the initial classifier baseline.
+
 [Open the training notebook in Colab](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/train_role_labeller.ipynb). Connect to a hosted CPU runtime and choose **Runtime → Run all**. The notebook fetches a pinned revision of the public corpus and model code. Each run trains a new hierarchical BiLSTM-CRF from random initialization.
 
 The seeded split reserves 10 whole judgments for testing. The notebook first trains on 32 cases and evaluates on 8 validation cases. It then trains a fresh final model on all 40 training cases and evaluates its role predictions on the 10 test cases. Each fit uses eight epochs. Download `/content/legal_lexrank_role_labeller.zip` from Colab’s Files pane before disconnecting. The archive contains both checkpoints, their checksums, per-role metrics, case IDs, and runtime details. The revised trainer reads every token of each sentence and learns transitions within contiguous labelled spans.
@@ -28,11 +34,19 @@ To run the benchmark with the published Colab checkpoints, pass their directory 
 python -m legal_lexrank --role-run runs/colab-roles --output runs/reproduction
 ```
 
-Each training judgment contributes one vector of seven proportions, one per rhetorical role among its labelled sentences. The arithmetic mean averages those vectors. The Chebyshev center minimizes the distance to the farthest judgment. The geometric median minimizes the sum of distances, reducing the influence of atypical cases. Both distance-based methods use Euclidean distance. These weights capture how common each role is in source judgments. Validation ROUGE tests how well each profile works for summarization.
+## Calculate RR weights independently
 
-Each encoder selects its best of the three profiles by average validation ROUGE-L F1. All three profiles and an unweighted baseline are evaluated on the ten held-out cases. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
+```sh
+python -m legal_lexrank.role_weights --data . --output runs/all-corpus-role-weights/weights.json
+```
 
-### Results on the ten held-out judgments
+Each of the 50 human-annotated judgments contributes one vector of seven proportions, one per rhetorical role among its labelled sentences. The arithmetic mean averages those vectors. The Chebyshev center minimizes the distance to the farthest judgment. The geometric median minimizes the sum of distances, reducing the influence of atypical cases. Both distance-based methods use Euclidean distance. These weights capture how common each role is in source judgments. The saved profiles include all 50 case IDs and a checksum of the human annotations. The classifier training split does not enter this calculation. [Calculated profiles](runs/all-corpus-role-weights/weights.json)
+
+The summarization comparison applies these same three corpus-wide profiles to every evaluation phase. Its optional per-encoder method selection uses ROUGE-L F1, separately from classifier selection by label accuracy. All three profiles and an unweighted baseline are reported on the ten classifier-test judgments. Because the RR profiles use all 50 annotated judgments, the summary comparison uses corpus-informed weights. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
+
+### Earlier baseline results
+
+The table and `runs/colab-benchmark` files were produced with the previous RR-weight protocol, which estimated weights from training subsets. They precede the all-50-judgment correction and the improved classifier run.
 
 The table reports ROUGE-L F1 averaged across the 30%, 40%, and 50% sentence budgets. The weighted and unweighted test columns use the same ten judgments and twenty reference summaries. The eight validation judgments determined the choice of weight method before test scoring.
 

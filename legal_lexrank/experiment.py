@@ -1,4 +1,4 @@
-"""Train and evaluate role-weighted LexRank by judgment, with a held-out test set."""
+"""Evaluate LexRank using corpus-wide human role weights and a held-out role labeller."""
 
 import argparse
 import csv
@@ -18,8 +18,9 @@ from .data import ROLES, load_cases, split_case_ids
 from .encoders import BACKENDS, MODEL_IDS, MODEL_REVISIONS, similarity_matrix
 from .labeller import fit_labeller, load_labeller
 from .metrics import SELECTION_METRIC, score_summaries
-from .ranking import fit_weights, rank_sentences, select_indices
+from .ranking import rank_sentences, select_indices
 from .role_study import EPOCHS, STAGES, json_bytes, role_accuracy, training_pairs, verified_checkpoints
+from .role_weights import fit_corpus_weights
 
 RATIOS = (0.3, 0.4, 0.5)
 METHODS = ("mean", "chebyshev", "geometric_median")
@@ -95,17 +96,18 @@ def macro_rows(backend, phase, rows, selected):
     ]
 
 
-def protocol(cases, split, seed):
+def protocol(cases, split, seed, weight_metadata=None):
     corpus = hashlib.sha256()
     for key, case in sorted(cases.items()):
         corpus.update(json_bytes([key, case.sentences, case.labelled_sentences, case.labels, case.references]))
     implementation = hashlib.sha256()
-    for module in ("data", "encoders", "experiment", "labeller", "metrics", "ranking", "role_study"):
+    for module in ("data", "encoders", "experiment", "labeller", "metrics", "ranking", "role_study", "role_weights"):
         implementation.update(Path(__file__).with_name(module + ".py").read_bytes())
     return {
         "implementation_sha256": implementation.hexdigest(),
-        "version": 1, "seed": seed, "case_ids": split, "corpus_sha256": corpus.hexdigest(),
+        "version": 2, "seed": seed, "case_ids": split, "corpus_sha256": corpus.hexdigest(),
         "roles": list(ROLES), "ratios": list(RATIOS), "role_epochs": EPOCHS, "methods": list(METHODS),
+        "role_weights": fit_corpus_weights(cases)["metadata"] if weight_metadata is None else weight_metadata,
         "metric": SELECTION_METRIC,
         "selection": "Highest validation mean across cases and all three ratios; ties in method order.",
         "references": "Mean across distinct A1 and A2 references per case, then macro-average cases.",
@@ -157,7 +159,9 @@ def _run(root, output, cache, backends, seed, role_run):
     torch.set_num_threads(min(4, torch.get_num_threads()))
     cases = load_cases(root)
     split = split_case_ids(cases, seed)
-    settings = protocol(cases, split, seed)
+    weight_bundle = fit_corpus_weights(cases)
+    profiles = weight_bundle["profiles"]
+    settings = protocol(cases, split, seed, weight_bundle["metadata"])
     if role_run is not None:
         role_run = Path(role_run)
         settings["role_checkpoint_sha256"] = verified_checkpoints(role_run, cases, split, seed, EPOCHS)
@@ -171,33 +175,31 @@ def _run(root, output, cache, backends, seed, role_run):
         else:
             checkpoint = role_run / filename
             model = load_labeller(checkpoint)
-        # Each judgment carries one vote in the profile estimators even when
-        # missing annotations divide its training data into multiple CRF spans.
-        profiles = fit_weights([[label for label in cases[key].labels if label is not None]
-                                for key in ids], ROLES)
-        return model, checkpoint, profiles
+        return model, checkpoint
 
-    dev_model, _, dev_profiles = fit_stage("validation")
+    dev_model, _ = fit_stage("validation")
     dev_ids = split["validation"]
     dev_roles = {key: dev_model.predict(cases[key].sentences) for key in dev_ids}
     validation_reports = {}
     for backend in backends:
         print(f"{backend}: comparing weights on {len(dev_ids)} validation cases", flush=True)
-        rows = evaluate(backend, cases, dev_ids, dev_roles, {"unweighted": None, **dev_profiles}, cache)
+        rows = evaluate(backend, cases, dev_ids, dev_roles, {"unweighted": None, **profiles}, cache)
         winner, scores = choose_method(rows)
         validation_reports[backend] = {"encoder": backend, "model": MODEL_IDS[backend],
                                        "selected_method": winner, "selection_scores": scores,
                                        "validation": rows}
 
-    final_model, checkpoint, final_profiles = fit_stage("test")
+    final_model, checkpoint = fit_stage("test")
     atomic_write(output / "role_labeller.pt", checkpoint.read_bytes())
-    atomic_write(output / "weights.json", json_bytes({"validation": dev_profiles, "test": final_profiles}))
+    atomic_write(output / "weights.json", json_bytes({
+        "metadata": settings["role_weights"], "validation": profiles, "test": profiles,
+    }))
     test_ids = split["test"]
     test_roles = {key: final_model.predict(cases[key].sentences) for key in test_ids}
     for backend, report in validation_reports.items():
         print(f"{backend}: selected {report['selected_method']}; scoring {len(test_ids)} test cases", flush=True)
         report["test"] = evaluate(backend, cases, test_ids, test_roles,
-                                  {"unweighted": None, **final_profiles}, cache)
+                                  {"unweighted": None, **profiles}, cache)
         atomic_write(output / (backend + ".json"), json_bytes(report))
         rebuild_tables(output)
     diagnostics = {"validation": role_accuracy(dev_model, cases, dev_ids),
