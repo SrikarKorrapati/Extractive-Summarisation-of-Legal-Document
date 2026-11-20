@@ -166,6 +166,46 @@ def _openai_embeddings(sentences, cache_dir):
     ]).astype(np.float32)
 
 
+def sentence_embeddings(backend: str, sentences: list[str], cache_dir: Path) -> np.ndarray:
+    """Return normalized pretrained vectors for both role training and inference."""
+    if backend not in ("sbert", "legalbert", "openai"):
+        raise ValueError("Role features require a pretrained sentence encoder")
+    dimensions = {"sbert": 384, "legalbert": 768, "openai": OPENAI_DIMENSIONS}[backend]
+    if not sentences:
+        return np.empty((0, dimensions), dtype=np.float32)
+    if any(not sentence.strip() for sentence in sentences):
+        raise ValueError("Each input sentence must contain text")
+    settings = ([OPENAI_CONTEXT, OPENAI_DIMENSIONS] if backend == "openai"
+                else [MAX_LENGTH[backend], "attention-masked-mean"])
+    identity = [1, MODEL_IDS[backend], MODEL_REVISIONS.get(backend), settings, sentences]
+    key = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+    directory = Path(cache_dir) / "sentence_vectors" / backend
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / (key + ".npy")
+    with FileLock(str(target) + ".lock"):
+        if target.is_file():
+            return np.load(target, allow_pickle=False)
+        if backend == "openai":
+            shared = Path(cache_dir) / "similarity" / backend
+            shared.mkdir(parents=True, exist_ok=True)
+            vectors = _openai_embeddings(sentences, shared)
+        else:
+            vectors = _local_embeddings(backend, sentences)
+        vectors = np.asarray(vectors, dtype=np.float32)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        if vectors.shape != (len(sentences), dimensions) or not np.isfinite(vectors).all() or np.any(norms == 0):
+            raise ValueError(f"{backend} returned invalid role embeddings")
+        vectors /= norms
+        with tempfile.NamedTemporaryFile(dir=directory, suffix=".npy", delete=False) as handle:
+            temporary = Path(handle.name)
+        try:
+            np.save(temporary, vectors, allow_pickle=False)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return vectors
+
+
 def similarity_matrix(backend: str, sentences: list[str], cache_dir: Path) -> np.ndarray:
     """Return the symmetric cosine matrix in sentence order, including the diagonal.
 

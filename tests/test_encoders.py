@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from legal_lexrank import encoders
 
@@ -125,3 +126,50 @@ def test_encoder_settings_invalidate_a_cached_matrix(tmp_path):
         assert embed.call_count == 2
         assert first[0, 1] == 0
         np.testing.assert_allclose(second[0, 1], 1, atol=1e-6)
+
+
+def test_sentence_vectors_preserve_order_and_invalidate_on_encoder_changes(tmp_path):
+    sentences = ["court appeal", "trial judgment", "court appeal"]
+
+    def fake_embeddings(backend, texts):
+        vectors = np.zeros((len(texts), 384), dtype=np.float32)
+        for index, text in enumerate(texts):
+            vectors[index, :2] = [3., 4.] if text == "court appeal" else [0., -5.]
+        return vectors
+
+    with patch.object(encoders, "_local_embeddings", side_effect=fake_embeddings) as embed:
+        vectors = encoders.sentence_embeddings("sbert", sentences, tmp_path)
+        assert vectors.dtype == np.float32
+        np.testing.assert_allclose(vectors[:, :2], [[.6, .8], [0., -1.], [.6, .8]], atol=1e-7)
+        np.testing.assert_allclose(np.linalg.norm(vectors, axis=1), 1., atol=1e-7)
+        np.testing.assert_array_equal(encoders.sentence_embeddings("sbert", sentences, tmp_path), vectors)
+        assert embed.call_count == 1
+
+        order = [1, 2, 0]
+        reordered = encoders.sentence_embeddings("sbert", [sentences[i] for i in order], tmp_path)
+        np.testing.assert_array_equal(reordered, vectors[order])
+        assert embed.call_count == 2
+        with patch.dict(encoders.MODEL_REVISIONS, sbert="different-revision"):
+            encoders.sentence_embeddings("sbert", sentences, tmp_path)
+            encoders.sentence_embeddings("sbert", sentences, tmp_path)
+        assert embed.call_count == 3
+        with patch.dict(encoders.MAX_LENGTH, sbert=128):
+            encoders.sentence_embeddings("sbert", sentences, tmp_path)
+        assert embed.call_count == 4
+
+
+def test_sentence_vectors_reject_zero_nonfinite_and_misaligned_outputs(tmp_path):
+    invalid = [
+        np.zeros((2, 384)),
+        np.ones((1, 384)),
+        np.ones((2, 385)),
+        np.full((2, 384), np.nan),
+        np.full((2, 384), np.inf),
+        np.ones(384),
+    ]
+    for index, vectors in enumerate(invalid):
+        cache = tmp_path / str(index)
+        with patch.object(encoders, "_local_embeddings", return_value=vectors):
+            with pytest.raises(ValueError):
+                encoders.sentence_embeddings("sbert", ["court", "appeal"], cache)
+        assert not list(cache.rglob("*.npy"))
