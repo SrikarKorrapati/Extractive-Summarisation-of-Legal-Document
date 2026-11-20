@@ -75,6 +75,8 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
     """Reject a mismatched split, training corpus, model implementation, or checkpoint."""
     directory = Path(directory)
     manifest = json.loads((directory / "protocol.json").read_text(encoding="utf-8"))
+    if manifest.get("format") == "legal-lexrank-role-study-v4":
+        return _verified_transformer_checkpoints(directory, cases, split, seed, manifest)
     contextual = manifest.get("format") == "legal-lexrank-role-study-v2"
     paper = manifest.get("format") == "legal-lexrank-role-study-v3"
     selected_epochs = manifest.get("epochs") if contextual or paper else epochs
@@ -151,6 +153,52 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
                     or model.config != expected_config
                     or model.metadata != expected_metadata):
                 raise ValueError(f"Role checkpoint metadata mismatch: {filename}")
+    return hashes
+
+
+def _verified_transformer_checkpoints(directory, cases, split, seed, manifest):
+    """Verify deployment provenance without requiring the tuning checkpoint.
+
+    The selected 32-case model's metrics remain frozen in ``selection.json``.
+    The deployed checkpoint was refitted on all 40 training cases, so it must
+    never be used to replace those original validation metrics.
+    """
+    from . import transformer_role_training as training
+
+    if type(seed) is not int or seed != training.SEED:
+        raise ValueError("Transformer role run requires the canonical seed-42 split")
+    corpus = training.corpus_manifest(cases, split)
+    selection_path = directory / "selection.json"
+    selection, _ = training.validate_selection(corpus, selection_path, verify_checkpoint=False)
+    chosen = selection["selected"]
+    fit_weights = training.class_weights(cases, split["fit"]).tolist()
+    refit_weights = training.class_weights(cases, split["train"]).tolist()
+    if any(candidate.get("class_weights") != fit_weights for candidate in selection["candidates"]):
+        raise ValueError("Transformer selection class weights differ from the fitting annotations")
+    selection_hash = training.file_sha256(selection_path)
+    expected = study_settings(cases, split, seed, chosen["best_epoch"])
+    expected.update({
+        **corpus, "format": training.PROTOCOL_FORMAT,
+        "architecture": training.ARCHITECTURE, "config": chosen["config"],
+        "schedule_epochs": selection["max_epochs"], "source_sha256": training.source_hashes(),
+        "selection_sha256": selection_hash, "optimizer": training.OPTIMIZER_SETTINGS,
+        "validation_metrics": chosen["validation"], "selected_candidate": chosen["candidate"],
+        "fit_class_weights": fit_weights, "refit_class_weights": refit_weights,
+        "validation_checkpoint_sha256": chosen["checkpoint_sha256"],
+        "selection_metric": selection["selection_metric"],
+        "refit_policy": "fresh original pretrained encoder and new head; fixed selected configuration and epoch count; no evaluation",
+    })
+    for field, value in expected.items():
+        if manifest.get(field) != value:
+            raise ValueError(f"Role run is incompatible with this experiment: {field}")
+    hashes = manifest.get("checkpoint_sha256")
+    if not isinstance(hashes, dict) or set(hashes) != {"test"}:
+        raise ValueError("Transformer deployment requires exactly the final test checkpoint checksum")
+    checkpoint = directory / "role_labeller.pt"
+    if training.file_sha256(checkpoint) != hashes["test"]:
+        raise ValueError("Role checkpoint checksum mismatch: role_labeller.pt")
+    metadata = training.final_metadata(corpus, selection, selection_hash, refit_weights)
+    training.verify_checkpoint_metadata(checkpoint, metadata, chosen["config"])
     return hashes
 
 

@@ -129,6 +129,7 @@ def _run(root, output, cache, backends, seed, role_run):
     cases = load_cases(root)
     split = split_case_ids(cases, seed)
     settings = protocol(cases, split, seed)
+    transformer = False
     if role_run is not None:
         role_run = Path(role_run)
         settings["role_checkpoint_sha256"] = verified_checkpoints(role_run, cases, split, seed, EPOCHS)
@@ -139,6 +140,19 @@ def _run(root, output, cache, backends, seed, role_run):
         elif role_protocol["format"] == "legal-lexrank-role-study-v3":
             settings["role_encoder"] = role_protocol["encoder_identity"]
             settings["role_architecture"] = role_protocol["architecture"]
+        elif role_protocol["format"] == "legal-lexrank-role-study-v4":
+            transformer = True
+            config = role_protocol["config"]
+            settings["role_encoder"] = {
+                "backend": config["encoder"], "model": config["encoder_model"],
+                "revision": config["encoder_revision"],
+            }
+            settings["role_architecture"] = role_protocol["architecture"]
+            settings["role_config"] = config
+            settings["evaluation_phases"] = ["test"]
+            settings["role_validation_metrics_source"] = (
+                "Saved selection report from the 32-case fit model on eight validation cases"
+            )
     record_protocol(output, settings)
 
     def fit_stage(phase):
@@ -151,18 +165,29 @@ def _run(root, output, cache, backends, seed, role_run):
             model = load_labeller(checkpoint, cache_dir=cache / "similarities")
         return model, checkpoint
 
-    dev_model, _ = fit_stage("validation")
-    dev_ids = split["validation"]
-    dev_roles = {key: dev_model.predict(cases[key].sentences) for key in dev_ids}
     validation_reports = {}
-    for backend in backends:
-        print(f"{backend}: scoring {len(dev_ids)} validation cases", flush=True)
-        rows = evaluate(backend, cases, dev_ids, dev_roles, cache)
-        validation_reports[backend] = {"encoder": backend, "model": MODEL_IDS[backend],
-                                       "validation": rows}
+    if transformer:
+        # Deployment carries only the model refitted on all 40 training cases.
+        # Reusing it on validation would evaluate cases it has already learned.
+        validation_reports = {
+            backend: {"encoder": backend, "model": MODEL_IDS[backend], "validation": []}
+            for backend in backends
+        }
+        validation_metrics = role_protocol["validation_metrics"]
+    else:
+        dev_model, _ = fit_stage("validation")
+        dev_ids = split["validation"]
+        dev_roles = {key: dev_model.predict(cases[key].sentences) for key in dev_ids}
+        for backend in backends:
+            print(f"{backend}: scoring {len(dev_ids)} validation cases", flush=True)
+            rows = evaluate(backend, cases, dev_ids, dev_roles, cache)
+            validation_reports[backend] = {"encoder": backend, "model": MODEL_IDS[backend],
+                                           "validation": rows}
+        validation_metrics = role_accuracy(dev_model, cases, dev_ids)
 
     final_model, checkpoint = fit_stage("test")
-    atomic_write(output / "role_labeller.pt", checkpoint.read_bytes())
+    if not transformer:
+        atomic_write(output / "role_labeller.pt", checkpoint.read_bytes())
     test_ids = split["test"]
     test_roles = {key: final_model.predict(cases[key].sentences) for key in test_ids}
     for backend, report in validation_reports.items():
@@ -170,7 +195,7 @@ def _run(root, output, cache, backends, seed, role_run):
         report["test"] = evaluate(backend, cases, test_ids, test_roles, cache)
         atomic_write(output / (backend + ".json"), json_bytes(report))
         rebuild_tables(output)
-    diagnostics = {"validation": role_accuracy(dev_model, cases, dev_ids),
+    diagnostics = {"validation": validation_metrics,
                    "test": role_accuracy(final_model, cases, test_ids)}
     atomic_write(output / "role_metrics.json", json_bytes(diagnostics))
 
@@ -182,6 +207,7 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path(".cache/legal_lexrank"))
     parser.add_argument("--backends", choices=BACKENDS, nargs="+", default=list(BACKENDS))
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--role-run", type=Path, help="Extracted role-study bundle with both fitted checkpoints")
+    parser.add_argument("--role-run", type=Path,
+                        help="Verified role-study bundle (transformer v4 needs only the final checkpoint)")
     args = parser.parse_args()
     run(args.data, args.output, args.cache, list(dict.fromkeys(args.backends)), args.seed, args.role_run)
