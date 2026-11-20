@@ -73,8 +73,32 @@ def study_settings(cases, split, seed, epochs):
 
 def verified_checkpoints(directory, cases, split, seed, epochs):
     """Reject a mismatched split, training corpus, model implementation, or checkpoint."""
+    directory = Path(directory)
     manifest = json.loads((directory / "protocol.json").read_text(encoding="utf-8"))
-    for field, expected in study_settings(cases, split, seed, epochs).items():
+    contextual = manifest.get("format") == "legal-lexrank-role-study-v2"
+    selected_epochs = manifest.get("epochs") if contextual else epochs
+    if type(selected_epochs) is not int or selected_epochs < 1:
+        raise ValueError("Role run has an invalid training epoch count")
+    settings = study_settings(cases, split, seed, selected_epochs)
+    if contextual:
+        from . import encoders
+
+        settings["format"] = "legal-lexrank-role-study-v2"
+        for field, module in (
+            ("contextual_labeller_sha256", "contextual_labeller"),
+            ("encoder_sha256", "encoders"), ("tuning_sha256", "tune_roles"),
+            ("final_training_sha256", "final_roles"),
+        ):
+            settings[field] = hashlib.sha256(Path(__file__).with_name(module + ".py").read_bytes()).hexdigest()
+        encoder = manifest.get("feature_encoder", {})
+        backend = encoder.get("backend")
+        if (backend not in ("sbert", "legalbert", "openai")
+                or encoder.get("model") != encoders.MODEL_IDS[backend]
+                or encoder.get("revision") != encoders.MODEL_REVISIONS.get(backend)
+                or encoder.get("normalization") != "l2"
+                or type(encoder.get("dimensions")) is not int or encoder["dimensions"] < 1):
+            raise ValueError("Role run has an incompatible feature encoder")
+    for field, expected in settings.items():
         if manifest.get(field) != expected:
             raise ValueError(f"Role run is incompatible with this experiment: {field}")
     hashes = manifest.get("checkpoint_sha256")
@@ -83,6 +107,28 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
     for phase, (_, filename) in STAGES.items():
         if hashlib.sha256((directory / filename).read_bytes()).hexdigest() != hashes[phase]:
             raise ValueError(f"Role checkpoint checksum mismatch: {filename}")
+        if contextual:
+            model = load_labeller(directory / filename)
+            config = manifest["config"]
+            expected_metadata = {
+                "seed": seed, "epoch": selected_epochs, "config": config,
+                "features_sha256": manifest["features_sha256"],
+            }
+            if phase == "validation":
+                expected_metadata.update({
+                    "fit_case_ids": split["fit"], "validation_case_ids": split["validation"],
+                    "validation": manifest["validation_metrics"],
+                })
+            else:
+                expected_metadata.update({
+                    "train_case_ids": split["train"], "selection_sha256": manifest["selection_sha256"],
+                })
+            if (getattr(model, "encoder", None) != backend or model.roles != ROLES
+                    or model.input_size != encoder["dimensions"]
+                    or model.config != {"hidden_size": config["hidden_size"],
+                                        "dropout": config["dropout"], "use_position": True}
+                    or model.metadata != expected_metadata):
+                raise ValueError(f"Role checkpoint metadata mismatch: {filename}")
     return hashes
 
 

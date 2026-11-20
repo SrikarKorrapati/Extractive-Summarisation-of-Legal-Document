@@ -34,6 +34,14 @@ To run the benchmark with the published Colab checkpoints, pass their directory 
 python -m legal_lexrank --role-run runs/colab-roles --output runs/reproduction
 ```
 
+## Label a new judgment
+
+Provide a UTF-8 file with one sentence per nonempty line and a fitted classifier checkpoint. The command prints each original sentence followed by its predicted role, separated by a tab.
+
+```sh
+python -m legal_lexrank.label_roles new_judgment.txt --checkpoint runs/colab-roles/role_labeller.pt
+```
+
 ## Calculate RR weights independently
 
 ```sh

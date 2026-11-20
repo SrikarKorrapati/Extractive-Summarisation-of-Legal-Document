@@ -22,9 +22,10 @@ def test_summary_uses_selected_weights_unless_overridden(tmp_path, capsys, monke
             assert source == sentences
             return ["Facts", "Argument", "Argument"]
 
-    def load_fixture(path):
+    def load_fixture(path, cache_dir=None):
         assert method != "unweighted", "unweighted LexRank requires no fitted artifacts"
         assert path == results / "role_labeller.pt"
+        assert cache_dir == tmp_path / "cache" / "similarities"
         return RoleLabeller()
 
     monkeypatch.setattr(summarize, "load_labeller", load_fixture)

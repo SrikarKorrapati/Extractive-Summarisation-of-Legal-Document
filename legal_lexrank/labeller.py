@@ -175,10 +175,14 @@ def fit_labeller(documents, roles, seed, checkpoint, *, epochs=8):
     return model
 
 
-def load_labeller(checkpoint):
+def load_labeller(checkpoint, cache_dir=None):
     """Load a fitted role tagger for sentence-aligned Viterbi predictions."""
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    if state["version"] not in (1, _CHECKPOINT_VERSION):
+    if state.get("format") == "contextual-role-v1":
+        from .contextual_labeller import load_contextual_labeller
+
+        return load_contextual_labeller(checkpoint, cache_dir=cache_dir)
+    if state.get("version") not in (1, _CHECKPOINT_VERSION):
         raise ValueError("Unsupported labeller checkpoint version")
     # Reconstructing a fitted model should not consume the caller's RNG state.
     with torch.random.fork_rng(devices=[]):

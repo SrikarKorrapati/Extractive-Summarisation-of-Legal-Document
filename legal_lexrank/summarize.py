@@ -36,7 +36,7 @@ def main(argv=None):
         if method != "unweighted":
             profiles = json.loads((args.results / "weights.json").read_text(encoding="utf-8"))
             weights = profiles["test"][method]
-            labeller = load_labeller(args.results / "role_labeller.pt")
+            labeller = load_labeller(args.results / "role_labeller.pt", cache_dir=args.cache / "similarities")
             labels = labeller.predict(sentences)
         cosine = similarity_matrix(args.backend, sentences, args.cache / "similarities")
         ranking = rank_sentences(cosine, labels, weights)

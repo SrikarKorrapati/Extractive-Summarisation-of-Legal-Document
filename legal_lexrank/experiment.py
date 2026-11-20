@@ -88,7 +88,7 @@ def protocol(cases, split, seed, weight_metadata=None):
     for key, case in sorted(cases.items()):
         corpus.update(json_bytes([key, case.sentences, case.labelled_sentences, case.labels, case.references]))
     implementation = hashlib.sha256()
-    for module in ("data", "encoders", "experiment", "labeller", "metrics", "ranking", "role_study", "role_weights"):
+    for module in ("data", "encoders", "experiment", "labeller", "contextual_labeller", "metrics", "ranking", "role_study", "role_weights"):
         implementation.update(Path(__file__).with_name(module + ".py").read_bytes())
     return {
         "implementation_sha256": implementation.hexdigest(),
@@ -152,6 +152,10 @@ def _run(root, output, cache, backends, seed, role_run):
     if role_run is not None:
         role_run = Path(role_run)
         settings["role_checkpoint_sha256"] = verified_checkpoints(role_run, cases, split, seed, EPOCHS)
+        role_protocol = json.loads((role_run / "protocol.json").read_text(encoding="utf-8"))
+        settings["role_epochs"] = role_protocol["epochs"]
+        if role_protocol["format"] == "legal-lexrank-role-study-v2":
+            settings["role_encoder"] = role_protocol["feature_encoder"]
     record_protocol(output, settings)
 
     def fit_stage(phase):
@@ -161,7 +165,7 @@ def _run(root, output, cache, backends, seed, role_run):
             model, checkpoint = trained_model(cases, ids, seed, cache)
         else:
             checkpoint = role_run / filename
-            model = load_labeller(checkpoint)
+            model = load_labeller(checkpoint, cache_dir=cache / "similarities")
         return model, checkpoint
 
     dev_model, _ = fit_stage("validation")
