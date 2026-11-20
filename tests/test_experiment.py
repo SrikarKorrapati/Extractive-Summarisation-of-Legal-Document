@@ -7,9 +7,9 @@ from statistics import fmean
 import pytest
 from rouge_score.rouge_scorer import RougeScorer
 
-from legal_lexrank import experiment, role_weights
+from legal_lexrank import experiment
 from legal_lexrank.data import ROLES, load_cases
-from legal_lexrank.ranking import fit_weights
+from legal_lexrank.ranking import DEFAULT_ROLE_WEIGHTS
 
 
 def write_corpus(root):
@@ -47,23 +47,6 @@ def test_document_protocol_end_to_end(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
     write_corpus(corpus)
     monkeypatch.setattr(experiment, "EPOCHS", 1)
-    # Record every case contributing to method selection. Identical ROUGE across
-    # two methods could otherwise hide an accidental test-set selection.
-    selection_cases = []
-    choose_method = experiment.choose_method
-
-    def observe_selection(rows):
-        selection_cases.append({row["case"] for row in rows})
-        return choose_method(rows)
-
-    monkeypatch.setattr(experiment, "choose_method", observe_selection)
-    profile_documents = []
-
-    def observe_profiles(documents, roles):
-        profile_documents.append(documents)
-        return fit_weights(documents, roles)
-
-    monkeypatch.setattr(role_weights, "fit_weights", observe_profiles)
     experiment.run(corpus, output, cache, ["tfidf"], seed=42)
     cases = load_cases(corpus)
     settings = read_json(output, "protocol.json")
@@ -75,27 +58,21 @@ def test_document_protocol_end_to_end(tmp_path, monkeypatch):
     assert set(split["fit"]) | set(split["validation"]) == set(split["train"])
     assert set(split["train"]).isdisjoint(split["test"])
     assert set(split["train"]) | set(split["test"]) == cases.keys()
-    assert selection_cases == [set(split["validation"])]
-    assert profile_documents == [[cases[key].labels for key in sorted(cases)]]
-    assert settings["version"] == 2
-    assert settings["role_weights"]["source"] == "human_annotations"
-    assert settings["role_weights"]["case_ids"] == sorted(cases)
-    assert settings["role_weights"]["case_count"] == 50
-    weights = read_json(output, "weights.json")
-    assert weights["metadata"] == settings["role_weights"]
-    assert weights["validation"] == weights["test"]
+    assert settings["version"] == 3
+    assert settings["role_weights"] == DEFAULT_ROLE_WEIGHTS
+    assert {p.name for p in output.iterdir()} == {
+        ".benchmark.lock", "protocol.json", "tfidf.json", "metrics.csv",
+        "role_labeller.pt", "role_metrics.json",
+    }
     report = read_json(output, "tfidf.json")
     with (output / "metrics.csv").open() as handle:
         macro = list(csv.DictReader(handle))
     scorer = RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
-    expected = fit_weights([cases[key].labels for key in sorted(cases)], ROLES)
     for phase in ("validation", "test"):
-        for method in experiment.METHODS:
-            assert weights[phase][method] == pytest.approx(expected[method])
         rows = report[phase]
-        combinations = [(row["case"], row["method"], row["ratio"]) for row in rows]
+        combinations = [(row["case"], row["weighting"], row["ratio"]) for row in rows]
         assert sorted(combinations) == sorted(product(
-            split[phase], ["unweighted", *experiment.METHODS], (0.3, 0.4, 0.5)
+            split[phase], ["fixed", "unweighted"], (0.3, 0.4, 0.5)
         ))
         for row in rows:
             case = cases[row["case"]]
@@ -112,37 +89,21 @@ def test_document_protocol_end_to_end(tmp_path, monkeypatch):
                         fmean(getattr(values[metric], attribute) for values in reference_scores)
                     )
         for aggregate in [record for record in macro if record["phase"] == phase]:
-            group = [row for row in rows if row["method"] == aggregate["method"]
+            group = [row for row in rows if row["weighting"] == aggregate["weighting"]
                      and row["ratio"] == float(aggregate["ratio"])]
             assert int(aggregate["cases"]) == len(split[phase]) == len(group)
             assert float(aggregate["rougeL_f1"]) == pytest.approx(fmean(row["rougeL_f1"] for row in group))
-    validation_means = {method: fmean(row["rougeL_f1"] for row in report["validation"]
-                                      if row["method"] == method) for method in experiment.METHODS}
-    assert report["selection_scores"] == pytest.approx(validation_means)
-    assert report["selected_method"] == max(experiment.METHODS, key=validation_means.get)
-
-    # All human annotations contribute to RR weights, including judgments held
-    # out for labeller evaluation. Changing these labels updates the common
-    # profiles while the fitted labeller and unweighted rankings remain intact.
+    # Changing held-out annotations affects classifier diagnostics only. Every
+    # summary still uses the requested defaults and the model's predicted roles.
     for case_id in split["test"]:
         path = corpus / "Labelled_Data" / f"{case_id}.txt"
         path.write_text("\n".join(f"{s}\tFacts" for s in cases[case_id].labelled_sentences))
     changed = tmp_path / "altered-test-labels"
     experiment.run(corpus, changed, cache, ["tfidf"], seed=42)
-    assert selection_cases[-1] == set(split["validation"])
     assert read_json(changed, "role_metrics.json")["test"] != read_json(output, "role_metrics.json")["test"]
-    updated_cases = load_cases(corpus)
-    assert profile_documents[-1] == [updated_cases[key].labels for key in sorted(updated_cases)]
-    assert len(profile_documents) == 2
-    updated_weights = read_json(changed, "weights.json")
-    assert updated_weights["validation"] == updated_weights["test"]
-    assert updated_weights["test"]["mean"]["Facts"] > weights["test"]["mean"]["Facts"]
+    assert read_json(changed, "protocol.json")["role_weights"] == DEFAULT_ROLE_WEIGHTS
     assert (changed / "role_labeller.pt").read_bytes() == (output / "role_labeller.pt").read_bytes()
-    updated_report = read_json(changed, "tfidf.json")
-    for phase in ("validation", "test"):
-        assert [row for row in updated_report[phase] if row["method"] == "unweighted"] == [
-            row for row in report[phase] if row["method"] == "unweighted"
-        ]
+    assert read_json(changed, "tfidf.json") == report
 
 
 def test_rejects_unmanaged_output_with_missing_protocol(tmp_path):
@@ -154,14 +115,14 @@ def test_rejects_unmanaged_output_with_missing_protocol(tmp_path):
     assert not (tmp_path / "protocol.json").exists()
 
 
-def test_corpus_wide_weights_cannot_reuse_a_training_subset_protocol(tmp_path):
+def test_fixed_weights_require_a_matching_protocol(tmp_path):
     path = tmp_path / "protocol.json"
     previous = {"version": 1, "seed": 42}
     path.write_text(json.dumps(previous))
     with pytest.raises(ValueError, match="different protocol"):
         experiment.record_protocol(tmp_path, {
-            "version": 2, "seed": 42,
-            "role_weights": {"source": "human_annotations", "scope": "all_loaded_cases"},
+            "version": 3, "seed": 42,
+            "role_weights": DEFAULT_ROLE_WEIGHTS,
         })
     assert json.loads(path.read_text()) == previous
 

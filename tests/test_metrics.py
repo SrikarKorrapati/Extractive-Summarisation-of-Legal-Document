@@ -2,7 +2,7 @@ import unittest
 
 from rouge_score.rouge_scorer import RougeScorer
 
-from legal_lexrank.metrics import SELECTION_METRIC, score_summaries
+from legal_lexrank.metrics import score_summaries
 
 
 class RougeTests(unittest.TestCase):
@@ -38,13 +38,12 @@ class RougeTests(unittest.TestCase):
         self.assertEqual(scores["rouge2_precision"], 0.5)
         self.assertEqual(scores["rouge2_recall"], 0.5)
         self.assertEqual(scores["rouge2_f1"], 0.5)
-        self.assertEqual(SELECTION_METRIC, "rougeL_f1")
-        self.assertAlmostEqual(scores[SELECTION_METRIC], 5 / 6)
+        self.assertAlmostEqual(scores["rougeL_f1"], 5 / 6)
 
     def test_repeated_calls_return_independent_scores(self):
         scores = score_summaries("court appeal", ["court appeal"])
-        scores[SELECTION_METRIC] = -1
-        self.assertEqual(score_summaries("court appeal", ["court appeal"])[SELECTION_METRIC], 1.0)
+        scores["rougeL_f1"] = -1
+        self.assertEqual(score_summaries("court appeal", ["court appeal"])["rougeL_f1"], 1.0)
 
     def test_missing_references_and_accidental_string(self):
         with self.assertRaisesRegex(ValueError, "At least one reference"):

@@ -1,130 +1,25 @@
-"""Fit rhetorical-role profiles on training cases and rank a document's sentences."""
+"""Rank judgment sentences with fixed rhetorical-role weights."""
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 import math
 
 import numpy as np
-from scipy.optimize import minimize
 
 
-def _chebyshev_center(profiles: np.ndarray) -> np.ndarray:
-    """Find the simplex center minimizing the largest Euclidean distance to a case."""
-    if np.all(profiles == profiles[0]):
-        return profiles[0].copy()
-
-    # Minimize the squared radius. For each case the corresponding constraint is
-    # radius_squared - ||center - case||^2 >= 0, which is smooth at zero.
-    def margins(params):
-        offsets = params[:-1] - profiles
-        return params[-1] - np.einsum("ij,ij->i", offsets, offsets)
-
-    def margin_jacobian(params):
-        return np.column_stack((2 * (profiles - params[:-1]), np.ones(len(profiles))))
-
-    mean = profiles.mean(axis=0)
-    start = np.r_[mean, np.max(np.sum((profiles - mean) ** 2, axis=1))]
-    objective_gradient = np.zeros_like(start)
-    objective_gradient[-1] = 1
-    sum_gradient = np.r_[np.ones_like(mean), 0]
-    fit = minimize(
-        lambda params: params[-1],
-        x0=start,
-        jac=lambda params: objective_gradient,
-        method="SLSQP",
-        bounds=[(0, 1)] * len(mean) + [(0, None)],
-        constraints=[
-            {"type": "ineq", "fun": margins, "jac": margin_jacobian},
-            {"type": "eq", "fun": lambda p: p[:-1].sum() - 1, "jac": lambda p: sum_gradient},
-        ],
-        options={"ftol": 1e-12, "maxiter": 1000},
-    )
-    if not fit.success or np.min(margins(fit.x)) < -1e-8:
-        raise RuntimeError(f"Minimum enclosing ball fit failed: {fit.message}")
-    center = np.maximum(fit.x[:-1], 0)
-    return center / center.sum()
-
-
-def _geometric_median(profiles: np.ndarray) -> np.ndarray:
-    """Minimize the sum of Euclidean distances using modified Weiszfeld iterations."""
-    center = profiles.mean(axis=0)
-    for _ in range(10000):
-        offsets = profiles - center
-        distances = np.linalg.norm(offsets, axis=1)
-        away = distances > 1e-12
-        if not away.any():
-            return center
-        inv_distance = 1 / distances[away]
-        target = np.average(profiles[away], axis=0, weights=inv_distance)
-        coincident = len(profiles) - away.sum()
-        if coincident:
-            # A data point is optimal only if its copies can cancel the gradient
-            # contributed by the other cases. Otherwise take a shortened step.
-            residual = np.linalg.norm((offsets[away] * inv_distance[:, None]).sum(axis=0))
-            if residual <= coincident:
-                return center
-            target = center + (1 - coincident / residual) * (target - center)
-        if np.linalg.norm(target - center) <= 1e-11:
-            return target
-        center = target
-    # At a 120-degree boundary Weiszfeld may approach the exact minimizing
-    # observation arbitrarily slowly. Check its subgradient optimality directly.
-    closest = profiles[np.argmin(np.linalg.norm(profiles - center, axis=1))]
-    offsets = profiles - closest
-    distances = np.linalg.norm(offsets, axis=1)
-    away = distances > 0
-    gradient = (offsets[away] / distances[away, None]).sum(axis=0)
-    if np.linalg.norm(gradient) <= np.count_nonzero(~away) + 1e-12:
-        return closest.copy()
-    # Just inside that boundary the solution can be close to, but distinct
-    # from, the observation. Refine the smooth objective with a line search.
-    def objective(candidate):
-        offsets = candidate - profiles
-        distances = np.linalg.norm(offsets, axis=1)
-        directions = offsets / np.maximum(distances[:, None], 1e-15)
-        return distances.sum(), directions.sum(axis=0)
-
-    fit = minimize(objective, center, jac=True, method="BFGS", options={"gtol": 1e-9})
-    candidate = np.maximum(fit.x, 0)
-    candidate /= candidate.sum()
-    _, gradient = objective(candidate)
-    # A subgradient bounds the objective error on the convex hull of the cases.
-    gap = np.max((candidate - profiles) @ gradient)
-    if not np.isfinite(gap) or gap > len(profiles) * 1e-7:
-        raise RuntimeError("Geometric median did not converge")
-    return candidate
-
-
-def fit_weights(
-    documents: Sequence[Sequence[str]], roles: Sequence[str]
-) -> dict[str, dict[str, float]]:
-    """Estimate three weight vectors from the labelled sentences in training cases."""
-    roles = tuple(roles)
-    if not roles or any(not role for role in roles) or len(set(roles)) != len(roles):
-        raise ValueError("roles must contain unique, nonempty role names")
-    role_set = set(roles)
-    rows = []
-    for document in documents:
-        counts = Counter(document)
-        if not counts or counts.keys() - role_set:
-            raise ValueError(f"Expected a nonempty case with known roles, got {list(counts)}")
-        rows.append([counts[role] / counts.total() for role in roles])
-    if not rows:
-        raise ValueError("At least one labelled training case is required")
-    profiles = np.asarray(rows, dtype=float)
-    estimates = {
-        "mean": profiles.mean(axis=0),
-        "chebyshev": _chebyshev_center(profiles),
-        "geometric_median": _geometric_median(profiles),
-    }
-    return {
-        name: {role: float(weight) for role, weight in zip(roles, values)}
-        for name, values in estimates.items()
-    }
+DEFAULT_ROLE_WEIGHTS = {
+    "Facts": 0.10,
+    "Argument": 0.10,
+    "Statute": 0.10,
+    "Precedent": 0.15,
+    "Ratio of the decision": 0.15,
+    "Ruling by Present Court": 0.20,
+    "Ruling by Lower Court": 0.20,
+}
 
 
 def rank_sentences(
-    cosine: np.ndarray, labels: Sequence[str] | None, weights: Mapping[str, float] | None
+    cosine: np.ndarray, labels: Sequence[str] | None,
+    weights: Mapping[str, float] | None = DEFAULT_ROLE_WEIGHTS,
 ) -> np.ndarray:
     """Rank sentence indices using the paper's weighted graph and uniform PageRank."""
     similarities = np.asarray(cosine, dtype=float)

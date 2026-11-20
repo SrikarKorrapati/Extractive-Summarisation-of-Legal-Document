@@ -4,7 +4,7 @@ This project compares TF-IDF, Sentence-BERT, Legal-BERT, and OpenAI embeddings i
 
 ## Train the role labeller on Google Colab
 
-Role classification and rhetorical-role importance are separate. The classifier learns from labelled training judgments and assigns labels to new documents. The three RR-weight profiles use human annotations across all 50 judgments.
+The classifier learns from labelled training judgments and assigns labels to new documents. Summarization applies the fixed rhetorical-role weights listed below.
 
 The [validation tuning notebook](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/tune_role_labeller.ipynb) compares pretrained Legal-BERT and OpenAI sentence representations followed by a document BiLSTM-CRF. It fits on 32 judgments, measures classification accuracy and per-role recall on eight validation judgments, and selects the training configuration and epoch. The final classifier is then fitted on all 40 training judgments before evaluating the ten reserved judgments.
 
@@ -42,35 +42,28 @@ Provide a UTF-8 file with one sentence per nonempty line and a fitted classifier
 python -m legal_lexrank.label_roles new_judgment.txt --checkpoint runs/colab-roles/role_labeller.pt
 ```
 
-## Calculate RR weights independently
+## Fixed rhetorical-role weights
+
+Every encoder uses the following default weights at all three summary lengths.
+
+| Rhetorical role | Weight |
+|---|---:|
+| Facts | 0.10 |
+| Argument | 0.10 |
+| Statute | 0.10 |
+| Precedent | 0.15 |
+| Ratio of the decision | 0.15 |
+| Ruling by Present Court | 0.20 |
+| Ruling by Lower Court | 0.20 |
+
+The seven weights sum to 1. They are defined in `legal_lexrank/ranking.py` and recorded in each benchmark's `protocol.json`. Each graph edge is the nonnegative sentence cosine similarity multiplied by the weights of the two predicted roles.
+
+The summarization benchmark evaluates these defaults alongside a similarity-only baseline on the validation and test judgments. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases. Reports identify the weighting as `fixed` or `unweighted`.
+
+Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment, point to a directory containing a fitted `role_labeller.pt` checkpoint. The default applies the fixed weights. Use `--unweighted` for the similarity-only baseline.
 
 ```sh
-python -m legal_lexrank.role_weights --data . --output runs/all-corpus-role-weights/weights.json
-```
-
-Each of the 50 human-annotated judgments contributes one vector of seven proportions, one per rhetorical role among its labelled sentences. The arithmetic mean averages those vectors. The Chebyshev center minimizes the distance to the farthest judgment. The geometric median minimizes the sum of distances, reducing the influence of atypical cases. Both distance-based methods use Euclidean distance. These weights capture how common each role is in source judgments. The saved profiles include all 50 case IDs and a checksum of the human annotations. The classifier training split does not enter this calculation. [Calculated profiles](runs/all-corpus-role-weights/weights.json)
-
-The summarization comparison applies these same three corpus-wide profiles to every evaluation phase. Its optional per-encoder method selection uses ROUGE-L F1, separately from classifier selection by label accuracy. All three profiles and an unweighted baseline are reported on the ten classifier-test judgments. Because the RR profiles use all 50 annotated judgments, the summary comparison uses corpus-informed weights. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
-
-### Earlier baseline results
-
-The table and `runs/colab-benchmark` files were produced with the previous RR-weight protocol, which estimated weights from training subsets. They precede the all-50-judgment correction and the improved classifier run.
-
-The table reports ROUGE-L F1 averaged across the 30%, 40%, and 50% sentence budgets. The weighted and unweighted test columns use the same ten judgments and twenty reference summaries. The eight validation judgments determined the choice of weight method before test scoring.
-
-| LexRank encoder | Weight method selected on validation | Validation, weighted | Test, weighted | Test, unweighted |
-|---|---|---:|---:|---:|
-| TF-IDF | Arithmetic mean | 0.3581 | 0.3739 | 0.3888 |
-| Sentence-BERT | Chebyshev center | 0.3784 | 0.3767 | **0.3914** |
-| Legal-BERT | Chebyshev center | **0.3850** | 0.3560 | 0.3751 |
-| OpenAI `text-embedding-3-large` | Chebyshev center | 0.3797 | 0.3583 | 0.3850 |
-
-Unweighted Sentence-BERT had the highest observed test average. Each encoder’s unweighted baseline outscored all three of its role-weighted profiles on that average. This comparison covers one 10-case test split. [Scores by summary length and weight method](runs/colab-benchmark/metrics.csv) · [Validation selection](runs/colab-benchmark/selection.csv) · [Seven role weights for each method](runs/colab-benchmark/weights.json)
-
-Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment after running the benchmark, specify its output directory:
-
-```sh
-python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/colab-benchmark
+python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/colab-roles
 ```
 
 ## Repository map

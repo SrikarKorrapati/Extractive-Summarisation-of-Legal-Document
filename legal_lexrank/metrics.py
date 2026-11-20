@@ -9,8 +9,6 @@ from rapidfuzz.distance import LCSseq
 from rouge_score.scoring import fmeasure
 from rouge_score.tokenizers import DefaultTokenizer
 
-SELECTION_METRIC = "rougeL_f1"
-
 _TOKENIZER = DefaultTokenizer(use_stemmer=True)
 
 
@@ -26,7 +24,7 @@ def _prepare(text: str) -> _PreparedText:
     return _PreparedText(tokens, Counter(tokens), Counter(zip(tokens, tokens[1:])))
 
 
-# The same references recur across encoders, compression ratios and role weights.
+# The same references recur across encoders and summary lengths.
 _prepare_reference = lru_cache(maxsize=128)(_prepare)
 
 
