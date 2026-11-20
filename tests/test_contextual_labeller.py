@@ -86,3 +86,25 @@ def test_failed_save_preserves_existing_checkpoint(tmp_path, monkeypatch):
         model.save(checkpoint)
     assert checkpoint.read_bytes() == previous
     assert list(tmp_path.iterdir()) == [checkpoint]
+
+
+def test_centering_roundtrip_preserves_legacy_state_and_input_transform(tmp_path):
+    legacy = ContextualRoleLabeller(3, ["fact", "decision"], "sbert", hidden_size=4)
+    assert "center_inputs" not in legacy.config
+    assert "feature_mean" not in legacy.state_dict()
+    centered = ContextualRoleLabeller(3, ["fact", "decision"], "sbert", hidden_size=4,
+                                      dropout=0, center_inputs=True)
+    centered.feature_mean.copy_(torch.tensor([0.2, 0.3, 0.4]))
+    vectors = torch.tensor([[0.2, 0.3, 0.4], [0.6, 0.2, 0.1]])
+    observed = []
+    hook = centered.projection.register_forward_pre_hook(lambda module, args: observed.append(args[0].clone()))
+    expected = centered.predict_vectors(vectors)
+    hook.remove()
+    torch.testing.assert_close(observed[0], F.normalize(vectors - centered.feature_mean, dim=1, eps=1e-12))
+    assert torch.isfinite(observed[0]).all()
+    path = tmp_path / "centered.pt"
+    centered.save(path)
+    restored = load_contextual_labeller(path)
+    assert restored.config["center_inputs"] is True
+    torch.testing.assert_close(restored.feature_mean, centered.feature_mean)
+    assert restored.predict_vectors(vectors) == expected

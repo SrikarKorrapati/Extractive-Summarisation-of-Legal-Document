@@ -11,7 +11,8 @@ from tempfile import TemporaryDirectory
 import torch
 
 from . import contextual_labeller, encoders, tune_roles
-from .contextual_labeller import ContextualRoleLabeller, load_contextual_labeller
+from .ablate_roles import initialize_model, fit_epoch
+from .contextual_labeller import load_contextual_labeller
 from .data import ROLES, load_cases
 from .role_study import study_settings
 from .storage import atomic_write, json_bytes
@@ -25,13 +26,17 @@ def validate_selection(features_manifest, selection_path):
             or selection.get("seed") != tune_roles.SEED
             or selection.get("feature_manifest") != features_manifest):
         raise ValueError("Selection is incompatible with the training feature bundle")
-    if selection["implementation_sha256"] != hashlib.sha256(Path(tune_roles.__file__).read_bytes()).hexdigest():
+    runner = selection.get("runner", "tune_roles")
+    if runner not in ("tune_roles", "ablate_roles"):
+        raise ValueError("Unsupported role selection runner")
+    runner_source = Path(__file__).with_name(runner + ".py")
+    if selection["implementation_sha256"] != hashlib.sha256(runner_source.read_bytes()).hexdigest():
         raise ValueError("The tuning implementation changed after model selection")
     chosen = selection["selected"]
     winner = max(selection["candidates"], key=lambda item: tune_roles.score_key(item["validation"]))
     if chosen != winner:
         raise ValueError("Selected model differs from the recorded validation winner")
-    if not isinstance(chosen["best_epoch"], int) or not 1 <= chosen["best_epoch"] <= selection["max_epochs"]:
+    if type(chosen["best_epoch"]) is not int or not 1 <= chosen["best_epoch"] <= selection["max_epochs"]:
         raise ValueError("Selected epoch is outside the recorded tuning schedule")
     checkpoint = selection_path.parent / "validation_labeller.pt"
     if hashlib.sha256(checkpoint.read_bytes()).hexdigest() != chosen["checkpoint_sha256"]:
@@ -43,11 +48,14 @@ def validate_selection(features_manifest, selection_path):
         "validation_case_ids": features_manifest["case_ids"]["validation"],
         "features_sha256": features_manifest["features_sha256"], "validation": chosen["validation"],
     }
+    expected_config = {"hidden_size": chosen["config"]["hidden_size"],
+                       "dropout": chosen["config"]["dropout"], "use_position": True}
+    if chosen["config"].get("center_inputs", False):
+        expected_config["center_inputs"] = True
     if (model.metadata != expected_metadata or model.roles != ROLES
             or model.encoder != features_manifest["backend"]
             or model.input_size != features_manifest["dimensions"]
-            or model.config != {"hidden_size": chosen["config"]["hidden_size"],
-                                "dropout": chosen["config"]["dropout"], "use_position": True}):
+            or model.config != expected_config):
         raise ValueError("Selected validation checkpoint metadata mismatch")
     return selection, checkpoint
 
@@ -64,7 +72,6 @@ def run(data, features, selection, output):
     config = chosen["config"]
     epochs = chosen["best_epoch"]
     split = manifest["case_ids"]
-    sequences = tune_roles.training_sequences(vectors, labels, split["train"])
     weights = tune_roles.class_weights(labels, split["train"])
     cases = load_cases(Path(data))
     protocol = study_settings(cases, split, tune_roles.SEED, epochs)
@@ -81,6 +88,9 @@ def run(data, features, selection, output):
         "contextual_labeller_sha256": hashlib.sha256(Path(contextual_labeller.__file__).read_bytes()).hexdigest(),
         "encoder_sha256": hashlib.sha256(Path(encoders.__file__).read_bytes()).hexdigest(),
         "tuning_sha256": hashlib.sha256(Path(tune_roles.__file__).read_bytes()).hexdigest(),
+        "ablation_sha256": hashlib.sha256(Path(__file__).with_name("ablate_roles.py").read_bytes()).hexdigest(),
+        "selection_runner": selection.get("runner", "tune_roles"),
+        "selection_runner_sha256": selection["implementation_sha256"],
         "final_training_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "optimizer": {"name": "AdamW", "weight_decay": 0.01, "gradient_clip_norm": 5.0},
         "training_class_weights": weights.tolist(),
@@ -96,28 +106,14 @@ def run(data, features, selection, output):
         rng = random.Random(tune_roles.SEED)
         with torch.random.fork_rng(devices=[]):
             torch.random.default_generator.manual_seed(tune_roles.SEED)
-            model = ContextualRoleLabeller(
-                manifest["dimensions"], ROLES, manifest["backend"],
-                hidden_size=config["hidden_size"], dropout=config["dropout"],
-            )
+            model = initialize_model(manifest, config, vectors, split["train"])
             optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=0.01)
-            order = list(range(len(sequences)))
+            order = list(split["train"])
             print(f"Refitting on {len(split['train'])} judgments for {epochs} selected epochs", flush=True)
             for epoch in range(1, epochs + 1):
-                model.train()
                 rng.shuffle(order)
-                losses = []
-                for index in order:
-                    values, gold = sequences[index]
-                    optimizer.zero_grad(set_to_none=True)
-                    loss = model.loss(values, gold, weights, config["auxiliary_strength"])
-                    if not torch.isfinite(loss):
-                        raise RuntimeError(f"Nonfinite final training loss at epoch {epoch}")
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-                    optimizer.step()
-                    losses.append(float(loss.detach()))
-                history.append({"epoch": epoch, "training_loss": sum(losses) / len(losses)})
+                loss = fit_epoch(model, vectors, labels, order, optimizer, weights, config)
+                history.append({"epoch": epoch, "training_loss": loss})
                 atomic_write(bundle / "training_history.json", json_bytes(history))
                 if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
                     print(f"final epoch {epoch}/{epochs}: training loss {history[-1]['training_loss']:.4f}", flush=True)

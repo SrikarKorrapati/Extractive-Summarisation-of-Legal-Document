@@ -48,7 +48,7 @@ def test_final_fit_uses_all_training_cases_and_fixed_selected_epochs(selected_mo
     monkeypatch.setattr(tune_roles, "evaluate", forbidden_evaluation)
     output = tmp_path / "final"
     protocol = final_roles.run(tmp_path, features, selection_path, output)
-    assert seen == split["train"]
+    assert sorted(seen) == split["train"]
     assert set(seen).isdisjoint(split["test"])
     assert protocol["format"] == "legal-lexrank-role-study-v2"
     assert protocol["epochs"] == 1

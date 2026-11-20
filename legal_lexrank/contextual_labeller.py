@@ -23,7 +23,7 @@ class ContextualRoleLabeller(nn.Module):
     """
 
     def __init__(self, input_size, roles, encoder, *, hidden_size=128, dropout=0.3,
-                 use_position=True, cache_dir=Path(".cache/legal_lexrank")):
+                 use_position=True, center_inputs=False, cache_dir=Path(".cache/legal_lexrank")):
         super().__init__()
         self.roles = tuple(roles)
         if not self.roles or len(set(self.roles)) != len(self.roles):
@@ -36,6 +36,9 @@ class ContextualRoleLabeller(nn.Module):
         self.encoder = encoder
         self.cache_dir = Path(cache_dir)
         self.config = {"hidden_size": hidden_size, "dropout": dropout, "use_position": use_position}
+        if center_inputs:
+            self.config["center_inputs"] = True
+            self.register_buffer("feature_mean", torch.zeros(input_size))
         self.metadata = {}
         self.dropout = nn.Dropout(dropout)
         self.projection = nn.Sequential(
@@ -60,6 +63,8 @@ class ContextualRoleLabeller(nn.Module):
         count = len(vectors)
         if count == 0:
             return vectors.new_empty((0, len(self.roles)))
+        if self.config.get("center_inputs", False):
+            vectors = F.normalize(vectors - self.feature_mean, dim=1, eps=1e-12)
         vectors = self.projection(vectors)
         if self.config["use_position"]:
             position = torch.linspace(0, 1, count, dtype=vectors.dtype, device=vectors.device)

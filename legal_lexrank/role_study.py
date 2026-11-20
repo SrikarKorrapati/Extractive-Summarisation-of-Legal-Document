@@ -90,6 +90,13 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
             ("final_training_sha256", "final_roles"),
         ):
             settings[field] = hashlib.sha256(Path(__file__).with_name(module + ".py").read_bytes()).hexdigest()
+        if "ablation_sha256" in manifest:
+            settings["ablation_sha256"] = hashlib.sha256(Path(__file__).with_name("ablate_roles.py").read_bytes()).hexdigest()
+        if "selection_runner" in manifest:
+            runner = manifest["selection_runner"]
+            if runner not in ("tune_roles", "ablate_roles"):
+                raise ValueError("Role run has an unsupported selection runner")
+            settings["selection_runner_sha256"] = hashlib.sha256(Path(__file__).with_name(runner + ".py").read_bytes()).hexdigest()
         encoder = manifest.get("feature_encoder", {})
         backend = encoder.get("backend")
         if (backend not in ("sbert", "legalbert", "openai")
@@ -123,10 +130,13 @@ def verified_checkpoints(directory, cases, split, seed, epochs):
                 expected_metadata.update({
                     "train_case_ids": split["train"], "selection_sha256": manifest["selection_sha256"],
                 })
+            expected_config = {"hidden_size": config["hidden_size"],
+                               "dropout": config["dropout"], "use_position": True}
+            if config.get("center_inputs", False):
+                expected_config["center_inputs"] = True
             if (getattr(model, "encoder", None) != backend or model.roles != ROLES
                     or model.input_size != encoder["dimensions"]
-                    or model.config != {"hidden_size": config["hidden_size"],
-                                        "dropout": config["dropout"], "use_position": True}
+                    or model.config != expected_config
                     or model.metadata != expected_metadata):
                 raise ValueError(f"Role checkpoint metadata mismatch: {filename}")
     return hashes
