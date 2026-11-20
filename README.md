@@ -4,13 +4,23 @@ This project compares TF-IDF, Sentence-BERT, Legal-BERT, and OpenAI embeddings i
 
 ## Train the role labeller on Google Colab
 
-The primary classifier follows the **pretrained Hier-BiLSTM-CRF** variant referenced by the Legal LexRank paper: raw 200-dimensional legal sent2vec sentence vectors → document BiLSTM (100 units per direction) → dropout 0.5 → linear seven-role scores → CRF. It uses the original legal-domain encoder. It has no added projection, normalization, position features, or auxiliary classification loss. [Original model and pretrained variant](https://github.com/Law-AI/semantic-segmentation/tree/16d16b2c9bad824b527d4ffa3e94e029e282b133).
+The primary role classifier fully fine-tunes a **non-generative transformer encoder** and a new seven-role classification head. It compares [InLegalBERT](https://huggingface.co/law-ai/InLegalBERT) with [DeBERTa-v3-base](https://huggingface.co/microsoft/deberta-v3-base). These are pretrained language encoders used to predict role labels; the classifier does not generate text. Every backbone layer is trained. The separate LexRank summarizer extracts original sentences.
 
-[Open the paper-model training notebook in Colab](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/paper_role_labeller.ipynb). It downloads verified sentence vectors for the 40 training judgments; Colab needs neither an API key nor the large sent2vec binary. The notebook fits on 32 judgments and uses eight validation judgments to select an optimizer schedule and epoch, by accuracy then macro F1. A fresh final model is fitted on all 40 training judgments for that fixed schedule. Download its checkpoint bundle and extract it into `runs/paper-colab`. Evaluate the ten reserved judgments separately after the model is frozen.
+[Open the transformer training notebook in Colab](https://colab.research.google.com/github/SrikarKorrapati/Extractive-Summarisation-of-Legal-Document/blob/main/notebooks/transformer_role_labeller.ipynb) and select a GPU runtime, such as a T4. The notebook uses Colab's preinstalled PyTorch with `transformers==4.57.1` and `sentencepiece==0.2.1`; it does not install the local Python 3.11 dependency lock. Role training needs no API key or native sent2vec installation.
 
-The four summarization encoders—TF-IDF, S-BERT, Legal-BERT and OpenAI—share this same role classifier. Their vectors determine graph similarities; they do not replace the classifier's legal sent2vec encoder. The graph uses the fixed rhetorical-role importance weights below.
+Each target sentence is encoded with its immediately preceding and following sentences from the same judgment. The classifier mean-pools only target-token representations, then applies dropout and a linear seven-role head. Inputs are limited to 512 tokens. Long targets are split into chunks of at most 384 tokens, preserving every target token; surrounding context is trimmed to fit. Chunk losses and sentence-level predictions are weighted by each chunk's share of target tokens.
 
-The earlier random-word baseline in `runs/colab-roles` reached 57.88% test accuracy and missed all 54 lower-court sentences. The contextual labeller modules and `tune_role_labeller.ipynb` are exploratory extensions with additional architectural components; they are not the primary paper reproduction. Current paper-model results will be reported after hosted training and frozen test evaluation finish.
+The notebook runs three separate stages with the fixed seed-42 judgment split:
+
+1. Fit each of the two configurations on 32 judgments. Select the encoder and epoch using macro F1 across all seven roles on eight validation judgments, with accuracy breaking ties. Training is bounded to six epochs per candidate with early-stopping patience two. Reports include lower-court precision, recall, F1 and support.
+2. Reload the selected original pretrained encoder and initialize a new head. Refit on all 40 training judgments for the selected epoch count, retaining the six-epoch learning-rate schedule horizon. Class weights are recomputed from these 40 judgments. This stage performs no evaluation.
+3. Freeze the final model and evaluate the ten reserved judgments once in a separate cell. Keep the model choice fixed after seeing these results.
+
+Both configurations use AdamW, square-root inverse-frequency class weights from their fitting data, FP16, gradient checkpointing and an effective batch of 32 chunks. InLegalBERT uses encoder/head learning rates `2e-5`/`1e-4`; DeBERTa uses `1e-5`/`1e-4`. The source revision, encoder revisions, split, selection and checkpoint hashes are recorded for verification. The downloaded bundle contains the final model, provenance, histories and held-out evaluation; validation checkpoints stay outside the deployment bundle. Extract it into `runs/transformer-colab`.
+
+The earlier experimental paper-model reproduction uses legal sent2vec vectors and a Hier-BiLSTM-CRF. Its validation accuracy was 65.06%, with zero of 99 lower-court sentences recognized. Its [notebook](notebooks/paper_role_labeller.ipynb) and implementation remain available as a baseline. No transformer result is claimed here before the hosted run and frozen evaluation complete.
+
+The four summarization encoders—TF-IDF, S-BERT, Legal-BERT and OpenAI—share the selected role classifier. Their vectors determine graph similarities. The graph uses the fixed rhetorical-role importance weights below.
 
 ## Reproduce the full summarization experiment
 
@@ -23,32 +33,24 @@ python -m pip install -r requirements.txt
 python -m pytest -q
 ```
 
-After extracting the paper-model Colab bundle, evaluate its role predictions and then run the summarization benchmark. The runner verifies the split, training annotations, model implementation and checkpoint hashes before scoring. Install the native inference dependency below first.
+After extracting the transformer Colab bundle, inspect the role report in `runs/transformer-colab/test-evaluation/role_metrics.json` and run the summarization benchmark. The runner verifies the split, training annotations, model implementation, selection and checkpoint hashes before scoring. The transformer bundle contains the complete fine-tuned weights; its pinned tokenizer files are downloaded on first local use and then cached.
 
 ```sh
-python -m legal_lexrank.evaluate_roles --role-run runs/paper-colab --output runs/paper-role-evaluation
-python -m legal_lexrank --role-run runs/paper-colab --output runs/paper-benchmark
+python -m legal_lexrank --role-run runs/transformer-colab --output runs/transformer-benchmark
 ```
 
-## Install the legal sentence encoder for inference
-
-Training in Colab uses the small exported feature archive. Classifying previously unseen text locally also needs the official 2.25 GB legal sent2vec binary and its native C++ binding. A C++ compiler is required. These commands use the pinned native source, not the unrelated PyPI package named `sent2vec`.
+If the separate held-out evaluation cell has not yet been run, evaluate the already frozen model once before the benchmark. Use `--device cuda` when a CUDA GPU is available; CPU is the default.
 
 ```sh
-python -m pip install Cython==0.29.37
-python -m pip install --no-deps --no-build-isolation https://github.com/epfml/sent2vec/archive/9efbc2dd69f6c737c3a752c9dc5fbb4843d578b6.zip
-mkdir -p .cache/role-original
-curl -L https://cse.iitkgp.ac.in/~saptarshi/models/sent2vec.bin -o .cache/role-original/sent2vec.bin
+python -m legal_lexrank.evaluate_roles --role-run runs/transformer-colab --output runs/transformer-colab/test-evaluation
 ```
-
-The adapter checks the exact file size and SHA256 `1e7f7f1c182a11444085262896ac833243ca4d8bd1f7168446f2219a0be909f0` before loading. Set `LEGAL_SENT2VEC_MODEL` to use a different file location. The binary stays outside Git. Sentence vectors are regenerated consistently for training and inference; the published text-vector files are not mixed with native outputs.
 
 ## Label a new judgment
 
 Provide a UTF-8 file with one sentence per nonempty line and a fitted classifier checkpoint. The command prints each original sentence followed by its predicted role, separated by a tab.
 
 ```sh
-python -m legal_lexrank.label_roles new_judgment.txt --checkpoint runs/paper-colab/role_labeller.pt
+python -m legal_lexrank.label_roles new_judgment.txt --checkpoint runs/transformer-colab/role_labeller.pt
 ```
 
 ## Fixed rhetorical-role weights
@@ -67,12 +69,12 @@ Every encoder uses the following default weights at all three summary lengths.
 
 The seven weights sum to 1. They are defined in `legal_lexrank/ranking.py` and recorded in each benchmark's `protocol.json`. Each graph edge is the nonnegative sentence cosine similarity multiplied by the weights of the two predicted roles.
 
-The summarization benchmark evaluates these defaults alongside a similarity-only baseline on the validation and test judgments. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases. Reports identify the weighting as `fixed` or `unweighted`.
+For the final transformer classifier, the summarization benchmark evaluates these defaults alongside a similarity-only baseline on the ten test judgments only. All four encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases. Reports identify the weighting as `fixed` or `unweighted`. The eight validation judgments are part of the final classifier's 40-case training set and are not scored as held-out summaries.
 
 Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment, point to a directory containing a fitted `role_labeller.pt` checkpoint. The default applies the fixed weights. Use `--unweighted` for the similarity-only baseline.
 
 ```sh
-python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/paper-colab
+python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/transformer-colab
 ```
 
 ## Repository map
@@ -83,6 +85,6 @@ python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --r
 | `Labelled_Data/` | Annotated sentence sequences for role training |
 | `Summary/`, `Summary_2/` | The two reference summary sets |
 | `legal_lexrank/` | Corpus loading, modelling, evaluation, and command-line tools |
-| `notebooks/` | Hosted Colab training notebook |
+| `notebooks/` | Transformer Colab workflow and earlier experimental notebooks |
 | `tests/` | Automated checks |
 | `docs/references/` | Research papers |
