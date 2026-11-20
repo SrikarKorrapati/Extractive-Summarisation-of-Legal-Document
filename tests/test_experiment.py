@@ -117,3 +117,38 @@ def test_document_protocol_end_to_end(tmp_path, monkeypatch):
     assert read_json(changed, "role_metrics.json")["test"] != read_json(output, "role_metrics.json")["test"]
     assert read_json(changed, "weights.json") == weights
     assert read_json(changed, "tfidf.json") == report
+
+
+def test_rejects_unmanaged_output_with_missing_protocol(tmp_path):
+    existing = tmp_path / "tfidf.json"
+    existing.write_text("{}")
+    with pytest.raises(ValueError, match="without a protocol"):
+        experiment.record_protocol(tmp_path, {"seed": 42})
+    assert existing.read_text() == "{}"
+    assert not (tmp_path / "protocol.json").exists()
+
+
+def test_overlapping_benchmark_writers_share_an_output_lock(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from filelock import FileLock, Timeout
+
+    entered, release = Event(), Event()
+
+    def paused_run(*args):
+        entered.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(experiment, "_run", paused_run)
+    out = tmp_path / "output"
+    with ThreadPoolExecutor() as executor:
+        job = executor.submit(experiment.run, tmp_path, out, tmp_path, ["tfidf"])
+        try:
+            assert entered.wait(5)
+            with pytest.raises(Timeout):
+                FileLock(out / ".benchmark.lock").acquire(timeout=0)
+        finally:
+            release.set()
+        job.result()
+    with FileLock(out / ".benchmark.lock", timeout=0):
+        assert out.is_dir()

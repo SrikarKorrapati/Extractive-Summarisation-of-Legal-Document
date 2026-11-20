@@ -14,24 +14,34 @@ import tempfile
 
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
+from torch.nn.utils.rnn import PackedSequence, pack_padded_sequence, pad_sequence
 
 
 _TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]")
-_MAX_TOKENS = 96
+_CHECKPOINT_VERSION = 2
 _PAD, _UNKNOWN = 0, 1
 
 
-def _tokens(sentence):
-    return _TOKEN_PATTERN.findall(sentence.casefold())[:_MAX_TOKENS]
+def _tokens(sentence, version):
+    tokens = _TOKEN_PATTERN.findall(sentence.casefold())
+    return tokens[:96] if version == 1 else tokens
 
 
-def _encode(sentences, vocabulary):
-    # Short empty inputs use one unknown word so the packed LSTM stays defined.
-    rows = [
-        torch.tensor([vocabulary.get(word, _UNKNOWN) for word in _tokens(sentence)] or [_UNKNOWN])
-        for sentence in sentences
-    ]
+def _number_shape(token):
+    return "<four_digit_number>" if len(token) == 4 else "<number>"
+
+
+def _encode(sentences, vocabulary, version):
+    # Only numbers absent from the fitted word vocabulary use a learned shape.
+    # Frequent section and article numbers retain their individual embeddings.
+    rows = []
+    for sentence in sentences:
+        ids = []
+        for token in _tokens(sentence, version):
+            if version == 2 and token.isdecimal() and token not in vocabulary:
+                token = _number_shape(token)
+            ids.append(vocabulary.get(token, _UNKNOWN))
+        rows.append(torch.tensor(ids or [_UNKNOWN]))
     lengths = torch.tensor([len(row) for row in rows])
     return pad_sequence(rows, batch_first=True, padding_value=_PAD), lengths
 
@@ -70,8 +80,9 @@ class LinearChainCRF(nn.Module):
 
 
 class RoleLabeller(nn.Module):
-    def __init__(self, vocabulary, roles):
+    def __init__(self, vocabulary, roles, version=_CHECKPOINT_VERSION):
         super().__init__()
+        self.version = version
         self.vocabulary = vocabulary
         self.roles = tuple(roles)
         self.embedding = nn.Embedding(len(vocabulary) + 2, 48, padding_idx=_PAD)
@@ -82,9 +93,14 @@ class RoleLabeller(nn.Module):
         self.crf = LinearChainCRF(len(roles))
 
     def forward(self, token_ids, lengths):
-        words = self.dropout(self.embedding(token_ids))
-        packed = pack_padded_sequence(words, lengths, batch_first=True, enforce_sorted=False)
-        _, (last_hidden, _) = self.word_lstm(packed)
+        # Embed only real tokens. A single long sentence otherwise allocates an
+        # equally long padded embedding for every sentence in the judgment.
+        tokens = pack_padded_sequence(token_ids, lengths, batch_first=True, enforce_sorted=False)
+        embedded = PackedSequence(
+            self.dropout(self.embedding(tokens.data)), tokens.batch_sizes,
+            tokens.sorted_indices, tokens.unsorted_indices,
+        )
+        _, (last_hidden, _) = self.word_lstm(embedded)
         sentences = torch.cat((last_hidden[0], last_hidden[1]), dim=1)
         contextual, _ = self.document_lstm(self.dropout(sentences).unsqueeze(0))
         return self.to_roles(self.dropout(contextual.squeeze(0)))
@@ -94,7 +110,7 @@ class RoleLabeller(nn.Module):
         if not sentences:
             return []
         self.eval()
-        emissions = self(*_encode(sentences, self.vocabulary))
+        emissions = self(*_encode(sentences, self.vocabulary, self.version))
         return [self.roles[i] for i in self.crf.decode(emissions)]
 
 
@@ -102,8 +118,8 @@ def fit_labeller(documents, roles, seed, checkpoint, *, epochs=8):
     """Fit on the supplied (sentences, labels) documents; atomically save weights.
 
     The CPU implementation learns all parameters from scratch. Vocabulary entries
-    must appear at least twice in the supplied training cases. The word encoder
-    sees the first 96 tokens; summaries still use the full source sentence.
+    retain words that occur at least twice. Rare numeric tokens share trained
+    shape embeddings. The word encoder processes every token in a sentence.
     """
     documents = list(documents)
     roles = tuple(roles)
@@ -119,12 +135,12 @@ def fit_labeller(documents, roles, seed, checkpoint, *, epochs=8):
         if set(labels) - set(role_ids):
             raise ValueError("Training document contains an unknown role label")
         for sentence in sentences:
-            counts.update(_tokens(sentence))
-    vocabulary = {
-        word: i + 2 for i, word in enumerate(sorted(w for w, count in counts.items() if count >= 2))
-    }
+            counts.update(_tokens(sentence, _CHECKPOINT_VERSION))
+    words = {word for word, count in counts.items() if count >= 2}
+    words.update(_number_shape(word) for word, count in counts.items() if count == 1 and word.isdecimal())
+    vocabulary = {word: index + 2 for index, word in enumerate(sorted(words))}
     encoded = [
-        (*_encode(sentences, vocabulary), torch.tensor([role_ids[label] for label in labels]))
+        (*_encode(sentences, vocabulary, _CHECKPOINT_VERSION), torch.tensor([role_ids[label] for label in labels]))
         for sentences, labels in documents
     ]
     rng = random.Random(seed)
@@ -148,7 +164,7 @@ def fit_labeller(documents, roles, seed, checkpoint, *, epochs=8):
         temp_path = Path(tmp.name)
     try:
         torch.save(
-            {"version": 1, "vocabulary": vocabulary, "roles": list(roles), "state": model.state_dict(),
+            {"version": _CHECKPOINT_VERSION, "vocabulary": vocabulary, "roles": list(roles), "state": model.state_dict(),
              "seed": seed, "epochs": epochs},
             temp_path,
         )
@@ -162,9 +178,11 @@ def fit_labeller(documents, roles, seed, checkpoint, *, epochs=8):
 def load_labeller(checkpoint):
     """Load a fitted role tagger for sentence-aligned Viterbi predictions."""
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    if state["version"] != 1:
+    if state["version"] not in (1, _CHECKPOINT_VERSION):
         raise ValueError("Unsupported labeller checkpoint version")
-    model = RoleLabeller(state["vocabulary"], state["roles"])
+    # Reconstructing a fitted model should not consume the caller's RNG state.
+    with torch.random.fork_rng(devices=[]):
+        model = RoleLabeller(state["vocabulary"], state["roles"], version=state["version"])
     model.load_state_dict(state["state"])
     model.eval()
     return model

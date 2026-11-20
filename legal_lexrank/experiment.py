@@ -12,35 +12,31 @@ from pathlib import Path
 from statistics import fmean
 
 import torch
-from sklearn.metrics import classification_report
+from filelock import FileLock
 
 from .data import ROLES, load_cases, split_case_ids
 from .encoders import BACKENDS, MODEL_IDS, MODEL_REVISIONS, similarity_matrix
 from .labeller import fit_labeller, load_labeller
 from .metrics import SELECTION_METRIC, score_summaries
 from .ranking import fit_weights, rank_sentences, select_indices
+from .role_study import EPOCHS, STAGES, json_bytes, role_accuracy, training_pairs, verified_checkpoints
 
 RATIOS = (0.3, 0.4, 0.5)
 METHODS = ("mean", "chebyshev", "geometric_median")
 METRICS = [f"{name}_{stat}" for name in ("rouge1", "rouge2", "rougeL")
            for stat in ("precision", "recall", "f1")]
-EPOCHS = 8
 
 
 def atomic_write(path, data):
     """Replace one result file only after the new contents have been written."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
+    handle = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
     try:
-        temporary.write_bytes(data)
-        os.replace(temporary, path)
+        with handle:
+            handle.write(data)
+        os.replace(handle.name, path)
     finally:
-        temporary.unlink(missing_ok=True)
-
-
-def json_bytes(value):
-    return (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
+        Path(handle.name).unlink(missing_ok=True)
 
 
 def save_csv(path, rows):
@@ -49,18 +45,6 @@ def save_csv(path, rows):
     writer.writeheader()
     writer.writerows(rows)
     atomic_write(path, buffer.getvalue().encode())
-
-
-def training_pairs(cases, ids):
-    documents = []
-    for key in ids:
-        case = cases[key]
-        pairs = [(s, role) for s, role in zip(case.labelled_sentences, case.labels, strict=True)
-                 if role is not None]
-        if not pairs:
-            raise ValueError(f"No labelled sentences in {key}")
-        documents.append(tuple(zip(*pairs)))
-    return documents
 
 
 def trained_model(cases, ids, seed, cache):
@@ -72,18 +56,6 @@ def trained_model(cases, ids, seed, cache):
         return load_labeller(checkpoint), checkpoint
     print(f"Training role labeller on {len(ids)} cases ({EPOCHS} epochs)", flush=True)
     return fit_labeller(docs, ROLES, seed, checkpoint, epochs=EPOCHS), checkpoint
-
-
-def role_accuracy(model, cases, ids):
-    gold, predicted = [], []
-    for key in ids:
-        case = cases[key]
-        guesses = model.predict(case.labelled_sentences)
-        for expected, guess in zip(case.labels, guesses, strict=True):
-            if expected is not None:
-                gold.append(expected)
-                predicted.append(guess)
-    return classification_report(gold, predicted, labels=ROLES, output_dict=True, zero_division=0)
 
 
 def evaluate(backend, cases, ids, predictions, profiles, cache):
@@ -128,7 +100,7 @@ def protocol(cases, split, seed):
     for key, case in sorted(cases.items()):
         corpus.update(json_bytes([key, case.sentences, case.labelled_sentences, case.labels, case.references]))
     implementation = hashlib.sha256()
-    for module in ("data", "encoders", "experiment", "labeller", "metrics", "ranking"):
+    for module in ("data", "encoders", "experiment", "labeller", "metrics", "ranking", "role_study"):
         implementation.update(Path(__file__).with_name(module + ".py").read_bytes())
     return {
         "implementation_sha256": implementation.hexdigest(),
@@ -143,8 +115,15 @@ def protocol(cases, split, seed):
 
 def record_protocol(out, settings):
     path = out / "protocol.json"
-    if path.exists() and json.loads(path.read_text()) != settings:
-        raise ValueError(f"{out} contains a different protocol or corpus; choose another --output")
+    if path.exists():
+        if json.loads(path.read_text()) != settings:
+            raise ValueError(f"{out} contains a different protocol or corpus; choose another --output")
+        return
+
+    artifacts = [f"{name}.json" for name in BACKENDS]
+    artifacts.extend(["selection.csv", "metrics.csv", "weights.json", "role_metrics.json", "role_labeller.pt"])
+    if any((out / name).exists() for name in artifacts):
+        raise ValueError(f"{out} contains benchmark artifacts without a protocol; choose another --output")
     atomic_write(path, json_bytes(settings))
 
 
@@ -165,18 +144,40 @@ def rebuild_tables(out):
     save_csv(out / "selection.csv", selection)
 
 
-def run(root, output, cache, backends, seed=42):
+def run(root, output, cache, backends, seed=42, role_run=None):
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    # Protect both protocol validation and every shared table/checkpoint update.
+    # FileLock releases the underlying OS lock if the writer is interrupted.
+    with FileLock(output / ".benchmark.lock"):
+        _run(root, output, cache, backends, seed, role_run)
+
+
+def _run(root, output, cache, backends, seed, role_run):
     torch.set_num_threads(min(4, torch.get_num_threads()))
     cases = load_cases(root)
     split = split_case_ids(cases, seed)
-    record_protocol(output, protocol(cases, split, seed))
-    def fit_stage(train_key):
+    settings = protocol(cases, split, seed)
+    if role_run is not None:
+        role_run = Path(role_run)
+        settings["role_checkpoint_sha256"] = verified_checkpoints(role_run, cases, split, seed, EPOCHS)
+    record_protocol(output, settings)
+
+    def fit_stage(phase):
+        train_key, filename = STAGES[phase]
         ids = split[train_key]
-        model, checkpoint = trained_model(cases, ids, seed, cache)
-        profiles = fit_weights([labels for _, labels in training_pairs(cases, ids)], ROLES)
+        if role_run is None:
+            model, checkpoint = trained_model(cases, ids, seed, cache)
+        else:
+            checkpoint = role_run / filename
+            model = load_labeller(checkpoint)
+        # Each judgment carries one vote in the profile estimators even when
+        # missing annotations divide its training data into multiple CRF spans.
+        profiles = fit_weights([[label for label in cases[key].labels if label is not None]
+                                for key in ids], ROLES)
         return model, checkpoint, profiles
 
-    dev_model, _, dev_profiles = fit_stage("fit")
+    dev_model, _, dev_profiles = fit_stage("validation")
     dev_ids = split["validation"]
     dev_roles = {key: dev_model.predict(cases[key].sentences) for key in dev_ids}
     validation_reports = {}
@@ -188,7 +189,7 @@ def run(root, output, cache, backends, seed=42):
                                        "selected_method": winner, "selection_scores": scores,
                                        "validation": rows}
 
-    final_model, checkpoint, final_profiles = fit_stage("train")
+    final_model, checkpoint, final_profiles = fit_stage("test")
     atomic_write(output / "role_labeller.pt", checkpoint.read_bytes())
     atomic_write(output / "weights.json", json_bytes({"validation": dev_profiles, "test": final_profiles}))
     test_ids = split["test"]
@@ -211,5 +212,6 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path(".cache/legal_lexrank"))
     parser.add_argument("--backends", choices=BACKENDS, nargs="+", default=list(BACKENDS))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--role-run", type=Path, help="Extracted role-study bundle with both fitted checkpoints")
     args = parser.parse_args()
-    run(args.data, args.output, args.cache, list(dict.fromkeys(args.backends)), args.seed)
+    run(args.data, args.output, args.cache, list(dict.fromkeys(args.backends)), args.seed, args.role_run)
