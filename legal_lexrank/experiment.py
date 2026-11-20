@@ -115,16 +115,20 @@ def rebuild_tables(out):
     save_csv(out / "metrics.csv", totals)
 
 
-def run(root, output, cache, backends, seed=42, role_run=None):
+def run(root, output, cache, backends, seed=42, role_run=None, device="cpu"):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     # Protect both protocol validation and every shared table/checkpoint update.
     # FileLock releases the underlying OS lock if the writer is interrupted.
     with FileLock(output / ".benchmark.lock"):
-        _run(root, output, cache, backends, seed, role_run)
+        _run(root, output, cache, backends, seed, role_run, device)
 
 
-def _run(root, output, cache, backends, seed, role_run):
+def _run(root, output, cache, backends, seed, role_run, device="cpu"):
+    if device not in ("cpu", "cuda", "mps"):
+        raise ValueError("device must be cpu, cuda, or mps")
+    if device != "cpu" and role_run is None:
+        raise ValueError("Non-CPU role inference requires a transformer v4 --role-run; legacy models support CPU only")
     torch.set_num_threads(min(4, torch.get_num_threads()))
     cases = load_cases(root)
     split = split_case_ids(cases, seed)
@@ -132,8 +136,10 @@ def _run(root, output, cache, backends, seed, role_run):
     transformer = False
     if role_run is not None:
         role_run = Path(role_run)
-        settings["role_checkpoint_sha256"] = verified_checkpoints(role_run, cases, split, seed, EPOCHS)
         role_protocol = json.loads((role_run / "protocol.json").read_text(encoding="utf-8"))
+        if device != "cpu" and role_protocol.get("format") != "legal-lexrank-role-study-v4":
+            raise ValueError("Non-CPU role inference requires a transformer v4 --role-run; legacy models support CPU only")
+        settings["role_checkpoint_sha256"] = verified_checkpoints(role_run, cases, split, seed, EPOCHS)
         settings["role_epochs"] = role_protocol["epochs"]
         if role_protocol["format"] == "legal-lexrank-role-study-v2":
             settings["role_encoder"] = role_protocol["feature_encoder"]
@@ -149,6 +155,7 @@ def _run(root, output, cache, backends, seed, role_run):
             }
             settings["role_architecture"] = role_protocol["architecture"]
             settings["role_config"] = config
+            settings["role_inference_device"] = device
             settings["evaluation_phases"] = ["test"]
             settings["role_validation_metrics_source"] = (
                 "Saved selection report from the 32-case fit model on eight validation cases"
@@ -163,6 +170,8 @@ def _run(root, output, cache, backends, seed, role_run):
         else:
             checkpoint = role_run / filename
             model = load_labeller(checkpoint, cache_dir=cache / "similarities")
+        if transformer:
+            model = model.to(device)
         return model, checkpoint
 
     validation_reports = {}
@@ -209,5 +218,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--role-run", type=Path,
                         help="Verified role-study bundle (transformer v4 needs only the final checkpoint)")
+    parser.add_argument("--device", choices=("cpu", "cuda", "mps"), default="cpu",
+                        help="Role classifier inference device; non-CPU requires a transformer v4 bundle")
     args = parser.parse_args()
-    run(args.data, args.output, args.cache, list(dict.fromkeys(args.backends)), args.seed, args.role_run)
+    run(args.data, args.output, args.cache, list(dict.fromkeys(args.backends)), args.seed, args.role_run, args.device)

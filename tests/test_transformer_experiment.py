@@ -40,10 +40,15 @@ def deployment(tmp_path, monkeypatch):
         "checkpoint_sha256": {"test": "verified-final-checkpoint"},
     }
     (role_run / "protocol.json").write_text(json.dumps(protocol))
-    calls = {"verify": [], "load": [], "predict": [], "similarity": []}
+    calls = {"verify": [], "load": [], "predict": [], "similarity": [], "device": []}
 
     class FinalModel:
+        def to(self, device):
+            calls["device"].append(device)
+            return self
+
         def predict(self, sentences):
+            assert calls["device"], "Move the classifier before inference"
             calls["predict"].append(list(sentences))
             return [ROLES[int(sentence.rsplit(" ", 1)[1])] for sentence in sentences]
 
@@ -89,6 +94,7 @@ def test_v4_scores_only_reserved_cases_for_all_encoders_and_uses_saved_validatio
     assert not (output / "role_labeller.pt").exists()
     assert calls["verify"] == [(role_run, split, 42, experiment.EPOCHS)]
     assert calls["load"] == [(role_run / "role_labeller.pt", cache / "similarities")]
+    assert calls["device"] == ["cpu"]
     expected_prediction_calls = ([cases[key].sentences for key in split["test"]]
                                  + [cases[key].labelled_sentences for key in split["test"]])
     assert calls["predict"] == expected_prediction_calls
@@ -151,3 +157,39 @@ def test_v4_existing_benchmark_rejects_changed_role_configuration(tmp_path, depl
         experiment.run(tmp_path, output, cache, ["tfidf"], role_run=role_run)
     assert len(calls["load"]) == old_load_count
     assert (output / "tfidf.json").read_bytes() == old_report
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
+def test_v4_classifier_moves_to_requested_device_before_inference(tmp_path, deployment, device):
+    role_run, _, _, _, calls = deployment
+    experiment.run(tmp_path, tmp_path / "benchmark", tmp_path / "cache", ["tfidf"],
+                   role_run=role_run, device=device)
+    assert calls["device"] == [device]
+    assert len(calls["predict"]) == 20
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("device", ["cuda", "mps"])
+def test_legacy_bundle_rejects_non_cpu_device_before_loading(tmp_path, deployment, version, device):
+    role_run, _, _, protocol, calls = deployment
+    protocol["format"] = f"legal-lexrank-role-study-v{version}"
+    (role_run / "protocol.json").write_text(json.dumps(protocol))
+    with pytest.raises(ValueError, match="legacy models support CPU only"):
+        experiment.run(tmp_path, tmp_path / "benchmark", tmp_path / "cache", ["tfidf"],
+                       role_run=role_run, device=device)
+    assert calls["verify"] == calls["load"] == calls["device"] == calls["predict"] == []
+
+
+def test_implicit_legacy_training_rejects_non_cpu_device(tmp_path, deployment):
+    _, _, _, _, calls = deployment
+    with pytest.raises(ValueError, match="requires a transformer v4"):
+        experiment.run(tmp_path, tmp_path / "benchmark", tmp_path / "cache", ["tfidf"], device="cuda")
+    assert calls["load"] == calls["predict"] == []
+
+
+def test_cli_passes_selected_device(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(experiment, "run", lambda *args: calls.append(args))
+    monkeypatch.setattr("sys.argv", ["experiment", "--role-run", str(tmp_path), "--device", "cuda"])
+    experiment.main()
+    assert calls[0][-2:] == (tmp_path, "cuda")
