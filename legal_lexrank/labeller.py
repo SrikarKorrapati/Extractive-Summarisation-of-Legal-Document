@@ -178,6 +178,10 @@ def fit_labeller(documents, roles, seed, checkpoint, *, epochs=8):
 def load_labeller(checkpoint, cache_dir=None):
     """Load a fitted role tagger for sentence-aligned Viterbi predictions."""
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if state.get("format") == "transformer-role-v1":
+        from .transformer_labeller import load_transformer_labeller
+
+        return load_transformer_labeller(checkpoint, cache_dir=cache_dir)
     if state.get("format") == "paper-role-v1":
         from .paper_labeller import load_paper_labeller
 

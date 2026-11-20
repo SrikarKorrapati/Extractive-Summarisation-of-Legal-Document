@@ -13,7 +13,7 @@ from .role_study import EPOCHS, verified_checkpoints
 from .storage import atomic_write, json_bytes
 
 
-def evaluate(data, role_run, output, cache=Path('.cache/legal_lexrank/similarities')):
+def evaluate(data, role_run, output, cache=Path('.cache/legal_lexrank/similarities'), device='cpu'):
     role_run, output = Path(role_run), Path(output)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError(f'Choose a new or empty evaluation directory: {output}')
@@ -22,6 +22,8 @@ def evaluate(data, role_run, output, cache=Path('.cache/legal_lexrank/similariti
     split = split_case_ids(cases, protocol['seed'])
     hashes = verified_checkpoints(role_run, cases, split, protocol['seed'], EPOCHS)
     model = load_labeller(role_run / 'role_labeller.pt', cache_dir=Path(cache))
+    if device != 'cpu':
+        model.to(device)
     gold, predictions, records = [], [], []
     for case_id in split['test']:
         case = cases[case_id]
@@ -48,7 +50,7 @@ def evaluate(data, role_run, output, cache=Path('.cache/legal_lexrank/similariti
         'protocol_sha256': hashlib.sha256((role_run / 'protocol.json').read_bytes()).hexdigest(),
         'case_ids': split['test'], 'sentence_count': len(gold), 'roles': list(ROLES),
         'confusion_matrix': matrix, 'confusion_matrix_axes': {'rows': 'gold', 'columns': 'predicted'},
-        'selection_metric': 'validation accuracy, then macro F1',
+        'selection_metric': protocol.get('selection_metric', 'validation accuracy, then macro F1'),
         'refitting_during_evaluation': False,
     }
     output.mkdir(parents=True, exist_ok=True)
@@ -65,8 +67,9 @@ def main():
     parser.add_argument('--role-run', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--cache', type=Path, default=Path('.cache/legal_lexrank/similarities'))
+    parser.add_argument('--device', choices=('cpu', 'cuda', 'mps'), default='cpu')
     args = parser.parse_args()
-    evaluate(args.data, args.role_run, args.output, args.cache)
+    evaluate(args.data, args.role_run, args.output, args.cache, args.device)
 
 
 if __name__ == '__main__':
