@@ -20,6 +20,22 @@ class RoleWeightTests(unittest.TestCase):
         weights = fit_weights(documents, ["A", "B"])
         self.assertAlmostEqual(weights["geometric_median"]["A"], 0.6, places=8)
 
+    def test_geometric_median_at_120_degree_vertex(self):
+        # All three simplex profiles are distinct and the angle at the first is 120 degrees.
+        docs = [list("ABCC"), list("AACC"), list("ABBC")]
+        weights = fit_weights(docs, ["A", "B", "C"])
+        np.testing.assert_allclose(list(weights["geometric_median"].values()), [0.25, 0.25, 0.5])
+
+    def test_geometric_median_near_120_degree_vertex(self):
+        docs = [list("ABCC"), list("AACC"), list("A" * 2501 + "B" * 4999 + "C" * 2500)]
+        median = fit_weights(docs, ["A", "B", "C"])["geometric_median"]
+        center = np.array(list(median.values()))
+        profiles = np.array([[.25, .25, .5], [.5, 0, .5], [.2501, .4999, .25]])
+        offsets = center - profiles
+        distances = np.linalg.norm(offsets, axis=1)
+        self.assertGreater(distances.min(), 0)
+        np.testing.assert_allclose((offsets / distances[:, None]).sum(axis=0), 0, atol=1e-6)
+
     def test_identical_profiles_and_unused_role(self):
         weights = fit_weights([["A", "A", "B"], ["B", "A", "A"]], ["A", "B", "C"])
         for estimate in weights.values():

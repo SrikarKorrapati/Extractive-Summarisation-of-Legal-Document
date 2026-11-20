@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 
 import numpy as np
+from filelock import FileLock
 
 
 BACKENDS = ("tfidf", "sbert", "legalbert", "openai")
@@ -31,6 +32,7 @@ OPENAI_CONTEXT = 8191
 # Stay below the service's 300,000 token / 2,048 input caps.
 OPENAI_BATCH_TOKENS = 24_000
 OPENAI_BATCH_ITEMS = 128
+TFIDF_TOKEN_PATTERN = r"(?u)\b\w+\b"
 
 
 def _tfidf(sentences):
@@ -38,7 +40,7 @@ def _tfidf(sentences):
 
     if not any(re.search(r"\w", sentence) for sentence in sentences):
         return np.zeros((len(sentences), len(sentences)), dtype=np.float32)
-    vectorizer = TfidfVectorizer(token_pattern=r"(?u)\b\w+\b", dtype=np.float32)
+    vectorizer = TfidfVectorizer(token_pattern=TFIDF_TOKEN_PATTERN, dtype=np.float32)
     vectors = vectorizer.fit_transform(sentences)
     return (vectors @ vectors.T).toarray()
 
@@ -118,7 +120,10 @@ def _openai_embeddings(sentences, cache_dir):
 
     # Persist each successful API batch independently so interrupted runs resume.
     embeddings = {}
-    with closing(sqlite3.connect(cache_dir / f"{model_id}-{OPENAI_DIMENSIONS}.sqlite3", timeout=60)) as db:
+    database = cache_dir / f"{model_id}-{OPENAI_DIMENSIONS}.sqlite3"
+    # The same token chunk can occur in different judgments. Lock the shared
+    # DB through the remote request and commit so concurrent processes reuse it.
+    with FileLock(str(database) + ".lock"), closing(sqlite3.connect(database)) as db:
         db.execute("CREATE TABLE IF NOT EXISTS vectors (digest BLOB PRIMARY KEY, vector BLOB NOT NULL)")
         missing = []
         for digest, part in chunks.items():
@@ -174,7 +179,13 @@ def similarity_matrix(backend: str, sentences: list[str], cache_dir: Path) -> np
         raise ValueError("Each input sentence must contain text.")
     if not sentences:
         return np.empty((0, 0), dtype=np.float32)
-    identity = [1, MODEL_IDS[backend], MODEL_REVISIONS.get(backend), sentences]
+    if backend == "openai":
+        settings = ["token-weighted-chunk-mean", OPENAI_CONTEXT, OPENAI_DIMENSIONS]
+    elif backend == "tfidf":
+        settings = ["smoothed-unigram-tfidf", TFIDF_TOKEN_PATTERN]
+    else:
+        settings = ["attention-masked-mean", MAX_LENGTH[backend]]
+    identity = [2, backend, MODEL_IDS[backend], MODEL_REVISIONS.get(backend), settings, sentences]
     key = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
     directory = Path(cache_dir) / "similarity" / backend
     directory.mkdir(parents=True, exist_ok=True)

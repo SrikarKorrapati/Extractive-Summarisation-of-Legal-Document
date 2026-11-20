@@ -23,6 +23,7 @@ def test_summary_uses_selected_weights_unless_overridden(tmp_path, capsys, monke
             return ["Facts", "Argument", "Argument"]
 
     def load_fixture(path):
+        assert method != "unweighted", "unweighted LexRank requires no fitted artifacts"
         assert path == results / "role_labeller.pt"
         return RoleLabeller()
 

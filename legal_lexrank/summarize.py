@@ -32,11 +32,12 @@ def main(argv=None):
             report = json.loads((args.results / f"{args.backend}.json").read_text(encoding="utf-8"))
             method = report["selected_method"]
         weights = None
+        labels = None
         if method != "unweighted":
             profiles = json.loads((args.results / "weights.json").read_text(encoding="utf-8"))
             weights = profiles["test"][method]
-        labeller = load_labeller(args.results / "role_labeller.pt")
-        labels = labeller.predict(sentences)
+            labeller = load_labeller(args.results / "role_labeller.pt")
+            labels = labeller.predict(sentences)
         cosine = similarity_matrix(args.backend, sentences, args.cache / "similarities")
         ranking = rank_sentences(cosine, labels, weights)
         for index in select_indices(ranking, args.ratio):

@@ -45,6 +45,13 @@ def test_malformed_annotation_includes_file_and_line_number(corpus, row, reason)
         load_cases(corpus)
 
 
+def test_tab_in_annotated_sentence_is_preserved(corpus):
+    (corpus / "Labelled_Data" / "case.txt").write_text("Exhibit\t12.\tFacts\n")
+    case = load_cases(corpus)["case"]
+    assert case.labelled_sentences == ["Exhibit\t12."]
+    assert case.labels == ["Facts"]
+
+
 def test_reports_each_unmatched_case_id(corpus):
     directory = corpus / "Summary_2"
     (directory / "case.txt").rename(directory / "other.txt")

@@ -36,7 +36,7 @@ def _read_annotations(path: Path) -> tuple[list[str], list[str | None]]:
         if not row.strip():
             continue
         if "\t" in row:
-            sentence, _, label = row.partition("\t")
+            sentence, _, label = row.rpartition("\t")
         else:
             # A space-delimited sentence can itself contain repeated spaces.
             sentence, separator, label = row.rstrip().rpartition("  ")

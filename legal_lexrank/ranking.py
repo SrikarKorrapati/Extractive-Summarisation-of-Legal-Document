@@ -67,7 +67,32 @@ def _geometric_median(profiles: np.ndarray) -> np.ndarray:
         if np.linalg.norm(target - center) <= 1e-11:
             return target
         center = target
-    raise RuntimeError("Geometric median did not converge")
+    # At a 120-degree boundary Weiszfeld may approach the exact minimizing
+    # observation arbitrarily slowly. Check its subgradient optimality directly.
+    closest = profiles[np.argmin(np.linalg.norm(profiles - center, axis=1))]
+    offsets = profiles - closest
+    distances = np.linalg.norm(offsets, axis=1)
+    away = distances > 0
+    gradient = (offsets[away] / distances[away, None]).sum(axis=0)
+    if np.linalg.norm(gradient) <= np.count_nonzero(~away) + 1e-12:
+        return closest.copy()
+    # Just inside that boundary the solution can be close to, but distinct
+    # from, the observation. Refine the smooth objective with a line search.
+    def objective(candidate):
+        offsets = candidate - profiles
+        distances = np.linalg.norm(offsets, axis=1)
+        directions = offsets / np.maximum(distances[:, None], 1e-15)
+        return distances.sum(), directions.sum(axis=0)
+
+    fit = minimize(objective, center, jac=True, method="BFGS", options={"gtol": 1e-9})
+    candidate = np.maximum(fit.x, 0)
+    candidate /= candidate.sum()
+    _, gradient = objective(candidate)
+    # A subgradient bounds the objective error on the convex hull of the cases.
+    gap = np.max((candidate - profiles) @ gradient)
+    if not np.isfinite(gap) or gap > len(profiles) * 1e-7:
+        raise RuntimeError("Geometric median did not converge")
+    return candidate
 
 
 def fit_weights(
@@ -99,13 +124,17 @@ def fit_weights(
 
 
 def rank_sentences(
-    cosine: np.ndarray, labels: Sequence[str], weights: Mapping[str, float] | None
+    cosine: np.ndarray, labels: Sequence[str] | None, weights: Mapping[str, float] | None
 ) -> np.ndarray:
     """Rank sentence indices using the paper's weighted graph and uniform PageRank."""
     similarities = np.asarray(cosine, dtype=float)
-    count = len(labels)
-    if similarities.shape != (count, count) or not np.isfinite(similarities).all():
-        raise ValueError("Expected a finite square cosine matrix aligned with labels")
+    if similarities.ndim != 2 or similarities.shape[0] != similarities.shape[1] or not np.isfinite(similarities).all():
+        raise ValueError("Expected a finite square cosine matrix")
+    count = similarities.shape[0]
+    if labels is not None and len(labels) != count:
+        raise ValueError("Expected one label per sentence")
+    if weights is not None and labels is None:
+        raise ValueError("Role-weighted ranking requires predicted sentence labels")
     if count == 0:
         return np.empty(0, dtype=int)
     # Cosine may be negative, but transition probabilities must be nonnegative.

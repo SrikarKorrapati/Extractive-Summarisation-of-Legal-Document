@@ -63,3 +63,65 @@ class EncoderTests(unittest.TestCase):
             before = len(calls)
             encoders.similarity_matrix("openai", ["2", "112"], Path(cache))
             self.assertEqual(len(calls), before)
+
+
+def _overlap_worker(cache, sentences, barrier):
+    """Start two independent clients at the same time against overlapping token IDs."""
+    import time
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.embeddings = self
+
+        def create(self, *, model, input, dimensions, encoding_format):
+            with (cache / "requests.log").open("a") as log:
+                log.writelines(f"{ids[0]}\n" for ids in input)
+            # Let the other process reach its cache lookup while this call is in flight.
+            time.sleep(0.2)
+            return SimpleNamespace(data=[
+                SimpleNamespace(index=i, embedding=[float(ids[0]), 1.]) for i, ids in enumerate(input)
+            ])
+
+        def close(self):
+            pass
+
+    codec = SimpleNamespace(encode_ordinary=lambda s: [int(s)])
+    with (patch.dict("os.environ", OPENAI_API_KEY="unused"), patch("openai.OpenAI", Client),
+          patch("tiktoken.encoding_for_model", return_value=codec), patch.object(encoders, "OPENAI_DIMENSIONS", 2)):
+        barrier.wait(timeout=20)
+        encoders.similarity_matrix("openai", sentences, cache)
+
+
+def test_concurrent_processes_pay_once_for_overlapping_sentences(tmp_path):
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    gate = ctx.Barrier(2)
+    workers = [ctx.Process(target=_overlap_worker, args=(tmp_path, pair, gate))
+               for pair in (["1", "2"], ["2", "3"])]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30)
+            assert worker.exitcode == 0
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join()
+    assert sorted((tmp_path / "requests.log").read_text().splitlines()) == ["1", "2", "3"]
+
+
+def test_encoder_settings_invalidate_a_cached_matrix(tmp_path):
+    sentences = ["A legal judgment", "The appeal succeeds"]
+    with patch.object(encoders, "_local_embeddings", side_effect=[
+        np.eye(2, dtype=np.float32), np.ones((2, 2), dtype=np.float32)
+    ]) as embed:
+        first = encoders.similarity_matrix("sbert", sentences, tmp_path)
+        with patch.dict(encoders.MAX_LENGTH, sbert=32):
+            second = encoders.similarity_matrix("sbert", sentences, tmp_path)
+            encoders.similarity_matrix("sbert", sentences, tmp_path)
+        assert embed.call_count == 2
+        assert first[0, 1] == 0
+        np.testing.assert_allclose(second[0, 1], 1, atol=1e-6)
