@@ -18,6 +18,8 @@ The notebook runs three separate stages with the fixed seed-42 judgment split:
 
 Both configurations use AdamW, square-root inverse-frequency class weights from their fitting data, FP16, gradient checkpointing and an effective batch of 32 chunks. InLegalBERT uses encoder/head learning rates `2e-5`/`1e-4`; DeBERTa uses `1e-5`/`1e-4`. The source revision, encoder revisions, split, selection and checkpoint hashes are recorded for verification. The downloaded bundle contains the final model, provenance, histories and held-out evaluation; validation checkpoints stay outside the deployment bundle. Extract it into `runs/transformer-colab`.
 
+An optional notebook cell also runs the complete summary benchmark on Colab after role evaluation. It verifies a published cache of 40 similarity matrices covering the four backends and ten test judgments, then uses the frozen role classifier on the GPU. This cached benchmark needs no API key and includes its completed JSON/CSV reports in the download under `summary-benchmark/`. The cache contains similarities and provenance, with no role labels or credentials.
+
 The earlier experimental paper-model reproduction uses legal sent2vec vectors and a Hier-BiLSTM-CRF. Its validation accuracy was 65.06%, with zero of 99 lower-court sentences recognized. Its [notebook](notebooks/paper_role_labeller.ipynb) and implementation remain available as a baseline. No transformer result is claimed here before the hosted run and frozen evaluation complete.
 
 The four summarization encoders—TF-IDF, S-BERT, Legal-BERT and OpenAI—share the selected role classifier. Their vectors determine graph similarities. The graph uses the fixed rhetorical-role importance weights below.
@@ -33,7 +35,7 @@ python -m pip install -r requirements.txt
 python -m pytest -q
 ```
 
-After extracting the transformer Colab bundle, inspect the role report in `runs/transformer-colab/test-evaluation/role_metrics.json` and run the summarization benchmark. The runner verifies the split, training annotations, model implementation, selection and checkpoint hashes before scoring. The transformer bundle contains the complete fine-tuned weights; its pinned tokenizer files are downloaded on first local use and then cached.
+After extracting the transformer Colab bundle, inspect the role report in `runs/transformer-colab/test-evaluation/role_metrics.json`. If you ran the optional hosted summary benchmark, its comparison is already in `runs/transformer-colab/summary-benchmark/metrics.csv`. Otherwise, run the summarization benchmark below. The runner verifies the split, training annotations, model implementation, selection and checkpoint hashes before scoring. The transformer bundle contains the complete fine-tuned weights; its pinned tokenizer files are downloaded on first local use and then cached. Add `--device cuda` for GPU role inference.
 
 ```sh
 python -m legal_lexrank --role-run runs/transformer-colab --output runs/transformer-benchmark
@@ -71,7 +73,7 @@ The seven weights sum to 1. They are defined in `legal_lexrank/ranking.py` and r
 
 For the final transformer classifier, the summarization benchmark evaluates these defaults alongside a similarity-only baseline on the ten test judgments only. All four encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases. Reports identify the weighting as `fixed` or `unweighted`. The eight validation judgments are part of the final classifier's 40-case training set and are not scored as held-out summaries.
 
-Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment, point to a directory containing a fitted `role_labeller.pt` checkpoint. The default applies the fixed weights. Use `--unweighted` for the similarity-only baseline.
+Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. Uncached OpenAI embeddings need `OPENAI_API_KEY` in the environment or an ignored local `.env` file; the optional Colab benchmark reuses verified similarities for all ten test judgments and needs no key. To run only the other three backends locally, append `--backends tfidf sbert legalbert`. To summarise a judgment, point to a directory containing a fitted `role_labeller.pt` checkpoint. The default applies the fixed weights. Use `--unweighted` for the similarity-only baseline.
 
 ```sh
 python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/transformer-colab
