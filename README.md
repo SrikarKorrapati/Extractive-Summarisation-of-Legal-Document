@@ -8,6 +8,8 @@ This project compares TF-IDF, Sentence-BERT, Legal-BERT, and OpenAI embeddings i
 
 The seeded split reserves 10 whole judgments for testing. The notebook first trains on 32 cases and evaluates on 8 validation cases. It then trains a fresh final model on all 40 training cases and evaluates its role predictions on the 10 test cases. Each fit uses eight epochs. Download `/content/legal_lexrank_role_labeller.zip` from Colab’s Files pane before disconnecting. The archive contains both checkpoints, their checksums, per-role metrics, case IDs, and runtime details. The revised trainer reads every token of each sentence and learns transitions within contiguous labelled spans.
 
+The [verified Colab run](runs/colab-roles/) includes both trained models. The final model correctly labelled 1,227 of 2,120 annotated sentences in the ten test judgments (57.88% accuracy, 0.4374 macro F1). Always predicting the most common training role, *Ratio of the decision*, gives 41.79% accuracy on the same cases. The model correctly identified zero of the 54 lower-court ruling sentences. [Per-role scores](runs/colab-roles/role_metrics.json) · [Training split and checksums](runs/colab-roles/protocol.json) · [Hosted runtime](runs/colab-roles/runtime.json)
+
 ## Reproduce the full summarization experiment
 
 From the repository root, use Python 3.11 to install the dependencies and run the checks.
@@ -20,14 +22,15 @@ python -m pytest -q
 python -m legal_lexrank --output runs/experiment
 ```
 
-To run the benchmark with the two Colab-trained checkpoints, unzip the training archive into an empty directory and pass that directory explicitly. The runner verifies the split, training annotations, model implementation and checkpoint hashes before scoring.
+To run the benchmark with the published Colab checkpoints, pass their directory explicitly. For a new Colab fit, extract your downloaded archive into a separate directory and pass its path. The runner verifies the split, training annotations, model implementation and checkpoint hashes before scoring.
 
 ```sh
-unzip legal_lexrank_role_labeller.zip -d runs/colab-roles
-python -m legal_lexrank --role-run runs/colab-roles --output runs/colab-benchmark
+python -m legal_lexrank --role-run runs/colab-roles --output runs/reproduction
 ```
 
-The full benchmark estimates arithmetic-mean, Chebyshev-center and geometric-median role weights from training cases. It selects a profile for each encoder on validation ROUGE-L F1 and evaluates all three profiles plus an unweighted baseline on the held-out cases. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
+Each training judgment contributes one vector of seven proportions, one per rhetorical role among its labelled sentences. The arithmetic mean averages those vectors. The Chebyshev center minimizes the distance to the farthest judgment. The geometric median minimizes the sum of distances, reducing the influence of atypical cases. Both distance-based methods use Euclidean distance. These weights capture how common each role is in source judgments. Validation ROUGE tests how well each profile works for summarization.
+
+Each encoder selects its best of the three profiles by average validation ROUGE-L F1. All three profiles and an unweighted baseline are evaluated on the ten held-out cases. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
 
 Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment after running the benchmark, specify its output directory:
 

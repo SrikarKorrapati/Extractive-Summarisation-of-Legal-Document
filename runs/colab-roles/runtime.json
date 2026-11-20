@@ -1,0 +1,12 @@
+{
+  "platform": "Google Colab",
+  "device": "cpu",
+  "source_revision": "dce96247aae788906f973faa97ae7bbfb953749f",
+  "release": "release-colab-external-images_20261118-060058_RC00",
+  "os": "Linux-6.6.159+-x86_64-with-glibc2.39",
+  "python": "3.13.18",
+  "torch": "2.14.1+cpu",
+  "sklearn": "1.6.1",
+  "started_utc": "2026-11-20T05:56:31.743796+00:00",
+  "finished_utc": "2026-11-20T05:59:49.338585+00:00"
+}
