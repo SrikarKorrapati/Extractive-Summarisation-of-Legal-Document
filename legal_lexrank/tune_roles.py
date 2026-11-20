@@ -15,8 +15,7 @@ import torch
 from . import encoders
 from .contextual_labeller import ContextualRoleLabeller
 from .data import ROLES, load_cases, split_case_ids
-from .experiment import atomic_write
-from .role_study import json_bytes
+from .storage import atomic_write, json_bytes
 
 
 SEED = 42

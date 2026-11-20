@@ -5,8 +5,6 @@ import csv
 import hashlib
 import io
 import json
-import os
-import tempfile
 from collections import defaultdict
 from pathlib import Path
 from statistics import fmean
@@ -21,23 +19,12 @@ from .metrics import SELECTION_METRIC, score_summaries
 from .ranking import rank_sentences, select_indices
 from .role_study import EPOCHS, STAGES, json_bytes, role_accuracy, training_pairs, verified_checkpoints
 from .role_weights import fit_corpus_weights
+from .storage import atomic_write
 
 RATIOS = (0.3, 0.4, 0.5)
 METHODS = ("mean", "chebyshev", "geometric_median")
 METRICS = [f"{name}_{stat}" for name in ("rouge1", "rouge2", "rougeL")
            for stat in ("precision", "recall", "f1")]
-
-
-def atomic_write(path, data):
-    """Replace one result file only after the new contents have been written."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
-    try:
-        with handle:
-            handle.write(data)
-        os.replace(handle.name, path)
-    finally:
-        Path(handle.name).unlink(missing_ok=True)
 
 
 def save_csv(path, rows):

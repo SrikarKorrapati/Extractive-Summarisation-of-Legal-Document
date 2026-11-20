@@ -13,16 +13,13 @@ from sklearn.metrics import accuracy_score, classification_report
 
 from .data import ROLES, load_cases, split_case_ids
 from .labeller import fit_labeller, load_labeller
+from .storage import json_bytes
 
 EPOCHS = 8
 STAGES = {
     "validation": ("fit", "validation_labeller.pt"),
     "test": ("train", "role_labeller.pt"),
 }
-
-
-def json_bytes(value):
-    return (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
 
 
 def training_pairs(cases, ids):
