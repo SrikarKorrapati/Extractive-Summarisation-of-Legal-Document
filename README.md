@@ -32,10 +32,23 @@ Each training judgment contributes one vector of seven proportions, one per rhet
 
 Each encoder selects its best of the three profiles by average validation ROUGE-L F1. All three profiles and an unweighted baseline are evaluated on the ten held-out cases. All encoders use the same sentence budgets (30%, 40%, and 50%) and stemmed ROUGE-1, ROUGE-2, and ROUGE-L precision, recall, and F1. Scores are averaged over distinct reference summaries within each case, then across cases.
 
+### Results on the ten held-out judgments
+
+The table reports ROUGE-L F1 averaged across the 30%, 40%, and 50% sentence budgets. The weighted and unweighted test columns use the same ten judgments and twenty reference summaries. The eight validation judgments determined the choice of weight method before test scoring.
+
+| LexRank encoder | Weight method selected on validation | Validation, weighted | Test, weighted | Test, unweighted |
+|---|---|---:|---:|---:|
+| TF-IDF | Arithmetic mean | 0.3581 | 0.3739 | 0.3888 |
+| Sentence-BERT | Chebyshev center | 0.3784 | 0.3767 | **0.3914** |
+| Legal-BERT | Chebyshev center | **0.3850** | 0.3560 | 0.3751 |
+| OpenAI `text-embedding-3-large` | Chebyshev center | 0.3797 | 0.3583 | 0.3850 |
+
+Unweighted Sentence-BERT had the highest observed test average. Each encoder’s unweighted baseline outscored all three of its role-weighted profiles on that average. This comparison covers one 10-case test split. [Scores by summary length and weight method](runs/colab-benchmark/metrics.csv) · [Validation selection](runs/colab-benchmark/selection.csv) · [Seven role weights for each method](runs/colab-benchmark/weights.json)
+
 Sentence-BERT uses the published 256-token input window, and Legal-BERT uses 512 tokens. In this corpus the Sentence-BERT limit truncates 11 of 8,656 raw judgment sentences. Legal-BERT fits all of them. The OpenAI backend needs `OPENAI_API_KEY` in the environment or an ignored local `.env` file. To run the other three backends, append `--backends tfidf sbert legalbert`. To summarise a judgment after running the benchmark, specify its output directory:
 
 ```sh
-python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/experiment
+python -m legal_lexrank.summarize Judgement/1971_S_1.txt --backend legalbert --ratio 0.4 --results runs/colab-benchmark
 ```
 
 ## Repository map

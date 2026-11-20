@@ -1,0 +1,13 @@
+encoder,method,selected,validation_mean_rougeL_f1
+tfidf,mean,True,0.3581377088457298
+tfidf,chebyshev,False,0.3579818414355151
+tfidf,geometric_median,False,0.3571766120435768
+sbert,mean,False,0.36413709031449915
+sbert,chebyshev,True,0.3784279426546951
+sbert,geometric_median,False,0.36417598842712134
+legalbert,mean,False,0.35706513206823787
+legalbert,chebyshev,True,0.3850353799340911
+legalbert,geometric_median,False,0.35701747219171964
+openai,mean,False,0.36047944252896996
+openai,chebyshev,True,0.37965797364609183
+openai,geometric_median,False,0.35957626778091734
