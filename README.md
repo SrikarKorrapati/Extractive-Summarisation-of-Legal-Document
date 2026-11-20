@@ -20,7 +20,11 @@ Both configurations use AdamW, square-root inverse-frequency class weights from 
 
 An optional notebook cell also runs the complete summary benchmark on Colab after role evaluation. It verifies a published cache of 40 similarity matrices covering the four backends and ten test judgments, then uses the frozen role classifier on the GPU. This cached benchmark needs no API key and includes its completed JSON/CSV reports in the download under `summary-benchmark/`. The cache contains similarities and provenance, with no role labels or credentials.
 
-The earlier experimental paper-model reproduction uses legal sent2vec vectors and a Hier-BiLSTM-CRF. Its validation accuracy was 65.06%, with zero of 99 lower-court sentences recognized. Its [notebook](notebooks/paper_role_labeller.ipynb) and implementation remain available as a baseline. No transformer result is claimed here before the hosted run and frozen evaluation complete.
+The classifier's frequency-based loss weights address label imbalance. LexRank's fixed role weights below determine sentence importance in the summary graph.
+
+The completed Colab run selected InLegalBERT and refitted it on all 40 training judgments. Its reserved-test accuracy is **61.46%**, macro F1 is **0.5390**, and lower-court recall is **9/54 (16.67%)**. **The requested 90% accuracy target was not reached.** See the [measured results and provenance](docs/transformer-colab-results.md). The completed model export is awaiting manual download from Colab before local verification and release publication.
+
+The earlier experimental paper-model reproduction uses legal sent2vec vectors and a Hier-BiLSTM-CRF. Its validation accuracy was 65.06%, with zero of 99 lower-court sentences recognized. Its [notebook](notebooks/paper_role_labeller.ipynb) and implementation remain available as a baseline.
 
 The four summarization encoders—TF-IDF, S-BERT, Legal-BERT and OpenAI—share the selected role classifier. Their vectors determine graph similarities. The graph uses the fixed rhetorical-role importance weights below.
 
